@@ -2,23 +2,8 @@
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useRef, useState } from 'react';
 import OpenAI from 'openai';
-import StreamingAvatar from '@heygen/streaming-avatar';
+import StreamingAvatar, { AvatarQuality, StartAvatarResponse } from '@heygen/streaming-avatar';
 import { getAccessToken } from './services/api';
-
-// Define interfaces and enums locally since they're not properly exported
-interface StartAvatarResponse {
-  session_id: string;
-  access_token: string;
-  url: string;
-  is_paid: boolean;
-  session_duration_limit: number;
-}
-
-enum AvatarQuality {
-  Low = "low",
-  Medium = "medium", 
-  High = "high"
-}
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
 import { Loader2 } from 'lucide-react';
