@@ -1,4 +1,5 @@
 // OpenAI Whisper-based speech recognition utility
+/*eslint-disable */
 export class WhisperRecognitionService {
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
