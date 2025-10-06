@@ -2,8 +2,17 @@
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useRef, useState } from 'react';
 import OpenAI from 'openai';
-import StreamingAvatar, { AvatarQuality, StartAvatarResponse } from '@heygen/streaming-avatar';
+import StreamingAvatar, { AvatarQuality } from '@heygen/streaming-avatar';
 import { getAccessToken } from './services/api';
+
+// Define StartAvatarResponse interface locally since it's not exported
+interface StartAvatarResponse {
+  session_id: string;
+  access_token: string;
+  url: string;
+  is_paid: boolean;
+  session_duration_limit: number;
+}
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
 import { Loader2 } from 'lucide-react';
