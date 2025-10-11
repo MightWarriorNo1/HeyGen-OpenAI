@@ -64,30 +64,34 @@ export const TextInput: React.FC = () => {
   }, [message, previousText, startListening, stopListening]);
 
   return (
-    <div className="flex flex-row gap-2 items-end w-full">
-      <Select
-        isSelected={(option) => option === taskType}
-        options={Object.values(TaskType)}
-        renderOption={(option) => option.toUpperCase()}
-        value={taskType.toUpperCase()}
-        onSelect={setTaskType}
-      />
-      <Select
-        isSelected={(option) => option === taskMode}
-        options={Object.values(TaskMode)}
-        renderOption={(option) => option.toUpperCase()}
-        value={taskMode.toUpperCase()}
-        onSelect={setTaskMode}
-      />
-      <Input
-        className="min-w-[500px]"
-        placeholder={`Type something for the avatar to ${taskType === TaskType.REPEAT ? "repeat" : "respond"}...`}
-        value={message}
-        onChange={setMessage}
-      />
-      <Button className="!p-2" onClick={handleSend}>
-        <SendIcon size={20} />
-      </Button>
+    <div className="flex flex-col sm:flex-row gap-2 items-end w-full">
+      <div className="flex flex-row gap-2 w-full sm:w-auto">
+        <Select
+          isSelected={(option) => option === taskType}
+          options={Object.values(TaskType)}
+          renderOption={(option) => option.toUpperCase()}
+          value={taskType.toUpperCase()}
+          onSelect={setTaskType}
+        />
+        <Select
+          isSelected={(option) => option === taskMode}
+          options={Object.values(TaskMode)}
+          renderOption={(option) => option.toUpperCase()}
+          value={taskMode.toUpperCase()}
+          onSelect={setTaskMode}
+        />
+      </div>
+      <div className="flex flex-row gap-2 w-full">
+        <Input
+          className="flex-1 min-w-0"
+          placeholder={`Type something for the avatar to ${taskType === TaskType.REPEAT ? "repeat" : "respond"}...`}
+          value={message}
+          onChange={setMessage}
+        />
+        <Button className="!p-2 flex-shrink-0" onClick={handleSend}>
+          <SendIcon size={20} />
+        </Button>
+      </div>
     </div>
   );
 };

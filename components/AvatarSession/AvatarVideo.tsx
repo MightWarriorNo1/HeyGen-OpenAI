@@ -16,13 +16,15 @@ export const AvatarVideo = forwardRef<HTMLVideoElement>(({}, ref) => {
   return (
     <>
       {connectionQuality !== ConnectionQuality.UNKNOWN && (
-        <div className="absolute top-3 left-3 bg-black text-white rounded-lg px-3 py-2">
-          Connection Quality: {connectionQuality}
+        <div className="absolute top-2 left-2 md:top-3 md:left-3 bg-black text-white rounded-lg px-2 py-1 md:px-3 md:py-2 text-xs md:text-sm">
+          <span className="hidden sm:inline">Connection Quality: </span>
+          <span className="sm:hidden">Quality: </span>
+          {connectionQuality}
         </div>
       )}
       {isLoaded && (
         <Button
-          className="absolute top-3 right-3 !p-2 bg-zinc-700 bg-opacity-50 z-10"
+          className="absolute top-2 right-2 md:top-3 md:right-3 !p-2 bg-zinc-700 bg-opacity-50 z-10"
           onClick={stopAvatar}
         >
           <CloseIcon />
