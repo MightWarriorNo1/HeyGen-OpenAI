@@ -5,7 +5,7 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from 'lucide-react';
+import { Camera, Loader2, Paperclip } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 
@@ -37,10 +37,13 @@ function App() {
   const avatar = useRef<StreamingAvatarApi | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const greetingRef = useRef<string | null>(null);
+  const greetingRetryCountRef = useRef<number>(0);
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
+  const [hasGreeted, setHasGreeted] = useState<boolean>(false);
   const [chatMessages, setChatMessages] = useState<ChatMessageType[]>([
     // {
     //   role: 'user',
@@ -76,7 +79,7 @@ function App() {
 
   // Control avatar sizing - always full screen
   useEffect(() => {
-      setIsAvatarFullScreen(true);
+    setIsAvatarFullScreen(true);
   }, []);
 
   // Set up vision camera video when stream is available
@@ -115,10 +118,10 @@ function App() {
         setIsListening(false);
       }
     } else {
-      console.log('Cannot start speech recognition:', { 
-        hasService: !!speechService.current, 
-        isListening, 
-        isAiProcessing 
+      console.log('Cannot start speech recognition:', {
+        hasService: !!speechService.current,
+        isListening,
+        isAiProcessing
       });
     }
   };
@@ -130,7 +133,7 @@ function App() {
     try {
       // Mark that user has started chatting
       setHasUserStartedChatting(true);
-      
+
       // Add user message to chat
       const updatedMessages = [...chatMessages, { role: 'user', message: transcript }];
       setChatMessages(updatedMessages);
@@ -142,8 +145,8 @@ function App() {
       const aiResponse = await openai.chat.completions.create({
         model: 'grok-2-latest',
         messages: [
-          { 
-            role: 'system', 
+          {
+            role: 'system',
             content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
@@ -168,7 +171,7 @@ RESPONSE STYLE:
 - Keep responses helpful but entertaining
 - If someone shares media, react with humor while being genuinely helpful
 
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!` 
+Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
           },
           ...updatedMessages.map(msg => {
             if (msg.media) {
@@ -220,7 +223,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     if (files) {
       // Mark that user has started chatting
       setHasUserStartedChatting(true);
-      
+
       const newFiles = Array.from(files);
 
       // Process each file and add to chat immediately
@@ -605,8 +608,30 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       if (avatarSpeech && data?.sessionId) {
         try {
           await avatar.current?.speak({ taskRequest: { text: avatarSpeech, sessionId: data?.sessionId } });
+          // Reset greeting retry count on success
+          if (greetingRef.current === avatarSpeech) {
+            greetingRef.current = null;
+            greetingRetryCountRef.current = 0;
+          }
         } catch (err: any) {
-          console.error(err);
+          console.error('Error speaking:', err);
+          // If this is the greeting and we got a session state error, retry after a delay
+          if (greetingRef.current === avatarSpeech &&
+            err?.response?.data?.code === 400006 &&
+            greetingRetryCountRef.current < 3) {
+            greetingRetryCountRef.current += 1;
+            console.log(`Retrying greeting (attempt ${greetingRetryCountRef.current}/3)...`);
+            setTimeout(() => {
+              if (greetingRef.current && data?.sessionId) {
+                setAvatarSpeech(greetingRef.current);
+              }
+            }, 2000);
+          } else if (greetingRef.current === avatarSpeech) {
+            // Give up after 3 retries or if it's a different error
+            console.log('Greeting failed after retries');
+            greetingRef.current = null;
+            greetingRetryCountRef.current = 0;
+          }
         }
       }
     }
@@ -745,6 +770,27 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, [isVisionMode, visionCameraStream, isAiProcessing]);
 
 
+  // Greeting effect - fallback to play greeting if it wasn't triggered in startAvatar
+  useEffect(() => {
+    if (isAvatarRunning && data?.sessionId && !hasGreeted && avatar.current) {
+      // Add a longer delay as fallback in case startAvatar didn't trigger it
+      const greetingTimeout = setTimeout(() => {
+        setHasGreeted(prev => {
+          if (!prev) {
+            const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
+            greetingRef.current = greeting;
+            greetingRetryCountRef.current = 0;
+            setAvatarSpeech(greeting);
+            return true;
+          }
+          return prev;
+        });
+      }, 3000); // Wait 3 seconds as fallback
+
+      return () => clearTimeout(greetingTimeout);
+    }
+  }, [isAvatarRunning, data?.sessionId, hasGreeted]);
+
   // useEffect called when the component mounts, to fetch the accessToken and automatically start the avatar
   useEffect(() => {
     async function initializeAndStartAvatar() {
@@ -754,7 +800,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
         if (!avatar.current) {
           avatar.current = new StreamingAvatarApi(
-            new Configuration({ 
+            new Configuration({
               accessToken: token,
               basePath: '/api/heygen'
             })
@@ -841,19 +887,33 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         },
       );
       console.log('Avatar session created:', res);
-      
+
       // Set up the media stream with proper error handling
       if (avatar.current?.mediaStream) {
-      setData(res);
+        setData(res);
         setStream(avatar.current.mediaStream);
-      setStartAvatarLoading(false);
-      setIsAvatarRunning(true);
+        setStartAvatarLoading(false);
+        setIsAvatarRunning(true);
         console.log('Avatar started successfully');
-        
+
         // Try to play immediately after a micro delay to ensure DOM is updated
         setTimeout(() => {
           playVideo();
         }, 10);
+
+        // Trigger greeting after a delay to ensure session is ready
+        setTimeout(() => {
+          setHasGreeted(prev => {
+            if (!prev) {
+              const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
+              greetingRef.current = greeting;
+              greetingRetryCountRef.current = 0;
+              setAvatarSpeech(greeting);
+              return true;
+            }
+            return prev;
+          });
+        }, 2500); // Wait 2.5 seconds for session to be fully ready
       } else {
         throw new Error('Media stream not available');
       }
@@ -895,16 +955,16 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     try {
       if (avatar.current && data?.sessionId) {
         // Use the interrupt method to stop current speech without ending the session
-        await avatar.current.interrupt({ 
-          interruptRequest: { 
-            sessionId: data.sessionId 
-          } 
+        await avatar.current.interrupt({
+          interruptRequest: {
+            sessionId: data.sessionId
+          }
         });
-        
+
         // Clear the speech text
         setAvatarSpeech('');
-        
-      toast({
+
+        toast({
           title: "Speech Stopped",
           description: "Avatar has stopped talking",
         });
@@ -939,10 +999,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       mediaStream.current.srcObject = stream;
       mediaStream.current.muted = false;
       mediaStream.current.volume = 1.0;
-      
+
       // Try to play immediately
       playVideo();
-      
+
       // Also try on loadedmetadata as backup
       mediaStream.current.onloadedmetadata = () => {
         playVideo();
@@ -1038,58 +1098,36 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         <div className="w-full h-screen pt-16 sm:pt-20">
           {/* Video Container - Full screen */}
           <div className="relative w-full h-full">
-            <Video 
-              ref={mediaStream} 
+            <Video
+              ref={mediaStream}
               className={`opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''}`}
               onClick={() => handleVideoClick()}
             />
-            
+
             {/* Click to play overlay when video needs interaction */}
-            {videoNeedsInteraction && (
-              <div 
+            {/* {videoNeedsInteraction && (
+              <div
                 className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm cursor-pointer z-10"
                 onClick={handleVideoClick}
               >
                 <div className="text-center p-6 bg-white/95 rounded-2xl shadow-2xl border border-white/20 max-w-sm mx-4">
                   <div className="w-16 h-16 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center mb-4 mx-auto">
                     <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
                   </div>
                   <h3 className="text-lg font-semibold text-gray-800 mb-2">Click to Start Avatar</h3>
                   <p className="text-gray-600 text-sm">Click anywhere to begin your conversation</p>
-            </div>
-          </div>
-        )}
-            {/* Start Chat indicator - non-clickable, disappears when user starts talking */}
-            {(isAvatarFullScreen && isAvatarRunning && !isAiProcessing && !hasUserStartedChatting) && (
-              <div className="absolute inset-x-0 bottom-28 sm:bottom-32 flex justify-center z-20">
-                <div className="px-6 py-3 sm:px-8 sm:py-4 rounded-2xl bg-gradient-to-r from-blue-500 to-purple-600 text-white font-semibold shadow-2xl border border-white/20 backdrop-blur-md transition-all duration-200 pointer-events-none">
-                  Start Chat
-            </div>
-          </div>
-        )}
-
-
-            {/* Control buttons when user has started chatting */}
-            {(isAvatarFullScreen && isAvatarRunning && hasUserStartedChatting) && (
+                </div>
+              </div>
+            )} */}
+            {/* Control buttons - Paper clip and Camera buttons */}
+            {(isAvatarFullScreen && isAvatarRunning) && (
               <>
                 {/* Paper clip and Camera buttons - slightly above hands */}
                 <div className="absolute inset-x-0 top-1/2 translate-y-8 flex justify-center gap-4 z-20">
-                {/* Paper Clip Button */}
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isAiProcessing}
-                    className="p-3 bg-white/90 hover:bg-white rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
-                  title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
-                >
-                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                  </svg>
-                </button>
-
                 {/* Camera Button */}
-                <button
+                  <button
                     onClick={async () => {
                       try {
                         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -1104,15 +1142,39 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                         });
                       }
                     }}
-                  disabled={isAiProcessing}
-                    className="p-3 bg-white/90 hover:bg-white rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    disabled={isAiProcessing}
+                    className={`h-12 w-20 ${'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80 shadow-lg items-center justify-center'
+                      }`}
+                    style={{
+                      borderRadius: '50px',
+                      border: '4px solid #8B4513',
+                      borderTop: '4px solid #8B4513',
+                      borderBottom: '4px solid #8B4513',
+                      position: 'relative',
+                      overflow: 'hidden'
+                    }}
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
-                >
-                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                </button>
+                  >
+                    <Camera className="h-8 w-8 m-auto" />
+                  </button>
+                  {/* Paper Clip Button */}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isAiProcessing}
+                    className={`h-12 w-20 ${'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80 shadow-lg items-center justify-center'
+                      }`}
+                    style={{
+                      borderRadius: '50px',
+                      border: '4px solid #8B4513',
+                      borderTop: '4px solid #8B4513',
+                      borderBottom: '4px solid #8B4513',
+                      position: 'relative',
+                      overflow: 'hidden'
+                    }}
+                    title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
+                  >
+                    <Paperclip className="h-8 w-8 m-auto" />
+                  </button>
                 </div>
 
                 {/* Hidden file input for paper clip button */}
@@ -1135,7 +1197,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         {isAvatarRunning && !startAvatarLoading && hasUserStartedChatting && (
           <div className="fixed bottom-20 sm:bottom-24 left-1/2 transform -translate-x-1/2 z-30 lg:left-1/2 lg:transform-none lg:bottom-20">
             <div className="flex gap-2 sm:gap-3">
-                <button
+              <button
                 onClick={stopAvatarSpeech}
                 className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20"
               >
@@ -1145,9 +1207,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 </svg>
                 <span className="hidden sm:inline">Stop Talking</span>
                 <span className="sm:hidden">Stop</span>
-                </button>
-              </div>
+              </button>
             </div>
+          </div>
         )}
 
         {/* Loading indicator when avatar is starting automatically */}
