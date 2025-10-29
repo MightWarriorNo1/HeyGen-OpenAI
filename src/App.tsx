@@ -1,8 +1,8 @@
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useRef, useState } from 'react';
 import OpenAI from 'openai';
-import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/streaming-avatar';
-import { getAccessToken } from './services/api';
+import { Room, RoomEvent, VideoPresets, RemoteTrack } from 'livekit-client';
+import { getAccessToken, createStreamingSession, startStreamingSession, sendStreamingTask, HeyGenSessionInfo } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
 import { Camera, Loader2, Paperclip } from 'lucide-react';
@@ -25,7 +25,8 @@ function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [avatarSpeech, setAvatarSpeech] = useState<string>('');
   const [stream, setStream] = useState<MediaStream>();
-  const [data, setData] = useState<NewSessionData>();
+  const [sessionInfo, setSessionInfo] = useState<HeyGenSessionInfo | undefined>();
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
   const mediaStream = useRef<HTMLVideoElement>(null);
   const visionVideoRef = useRef<HTMLVideoElement>(null);
@@ -34,7 +35,7 @@ function App() {
   const lastSampleImageDataRef = useRef<ImageData | null>(null);
   const stabilityStartRef = useRef<number | null>(null);
   const nextAllowedAnalysisAtRef = useRef<number>(0);
-  const avatar = useRef<StreamingAvatarApi | null>(null);
+  const livekitRoomRef = useRef<Room | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const greetingRef = useRef<string | null>(null);
@@ -93,10 +94,10 @@ function App() {
   const [startAvatarLoading, setStartAvatarLoading] = useState<boolean>(false);
   const [isAvatarRunning, setIsAvatarRunning] = useState<boolean>(false);
   const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
-  let timeout: any;
+  let timeout: number | undefined;
 
 
-  const apiKey: any = import.meta.env.VITE_XAI_API_KEY;
+  const apiKey: string | undefined = import.meta.env.VITE_XAI_API_KEY;
   const openai = new OpenAI({
     apiKey: apiKey,
     baseURL: "https://api.x.ai/v1",
@@ -184,7 +185,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           })
         ],
         temperature: 0.8,
-        max_tokens: 2500
+        max_tokens: 300
       });
 
       const aiMessage = aiResponse.choices[0].message.content || '';
@@ -195,13 +196,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Clear loading state
       setIsAiProcessing(false);
-    } catch (error: any) {
+      } catch (error: unknown) {
       console.error('Error processing speech result:', error);
       setIsAiProcessing(false);
       toast({
         variant: "destructive",
         title: "Uh oh! Something went wrong.",
-        description: error.message,
+          description: (error as Error).message,
       });
     }
   };
@@ -343,8 +344,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         model: 'grok-2-vision',
         messages: messages,
         temperature: 0.8,
-        max_tokens: 2500
-      } as any);
+        max_tokens: 300
+      });
 
       const aiMessage = aiResponse.choices[0].message.content || '';
       // Add AI response to chat
@@ -355,14 +356,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       // Clear loading state
       setIsAiProcessing(false);
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error processing vision analysis:', error);
       setIsAiProcessing(false);
       setIsVisionMode(false); // Exit vision mode on error
       toast({
         variant: "destructive",
         title: "Vision Analysis Error",
-        description: error.message || 'Failed to analyze the image. Please try again.',
+        description: (error as Error).message || 'Failed to analyze the image. Please try again.',
       });
     }
   };
@@ -443,8 +444,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
-            max_tokens: 2500
-          } as any);
+            max_tokens: 300
+          });
 
         } catch (visionError) {
           console.warn('Vision analysis failed, falling back to text-only:', visionError);
@@ -492,7 +493,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               }
             ],
             temperature: 0.8,
-            max_tokens: 2500
+            max_tokens: 300
           });
         }
       } else {
@@ -540,7 +541,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ],
           temperature: 0.8,
-          max_tokens: 2500
+          max_tokens: 300
         });
       }
 
@@ -552,13 +553,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Clear loading state
       setIsAiProcessing(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error processing media with AI:', error);
       setIsAiProcessing(false);
       toast({
         variant: "destructive",
         title: "Error processing media",
-        description: error.message,
+        description: (error as Error).message,
       });
     }
   };
@@ -602,32 +603,27 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, [isAvatarRunning, isAiProcessing]);
 
 
-  // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
+  // When avatarSpeech updates, send a talk task via HeyGen API
   useEffect(() => {
     async function speak() {
-      if (avatarSpeech && data?.sessionId) {
+      if (avatarSpeech && sessionInfo?.session_id && sessionToken) {
         try {
-          await avatar.current?.speak({ taskRequest: { text: avatarSpeech, sessionId: data?.sessionId } });
-          // Reset greeting retry count on success
+          await sendStreamingTask(sessionToken, sessionInfo.session_id, avatarSpeech, 'repeat');
           if (greetingRef.current === avatarSpeech) {
             greetingRef.current = null;
             greetingRetryCountRef.current = 0;
           }
-        } catch (err: any) {
-          console.error('Error speaking:', err);
-          // If this is the greeting and we got a session state error, retry after a delay
-          if (greetingRef.current === avatarSpeech &&
-            err?.response?.data?.code === 400006 &&
-            greetingRetryCountRef.current < 3) {
+        } catch (err: unknown) {
+          console.error('Error sending talk task:', err);
+          if (greetingRef.current === avatarSpeech && greetingRetryCountRef.current < 3) {
             greetingRetryCountRef.current += 1;
             console.log(`Retrying greeting (attempt ${greetingRetryCountRef.current}/3)...`);
             setTimeout(() => {
-              if (greetingRef.current && data?.sessionId) {
+              if (greetingRef.current && sessionInfo?.session_id && sessionToken) {
                 setAvatarSpeech(greetingRef.current);
               }
             }, 2000);
           } else if (greetingRef.current === avatarSpeech) {
-            // Give up after 3 retries or if it's a different error
             console.log('Greeting failed after retries');
             greetingRef.current = null;
             greetingRetryCountRef.current = 0;
@@ -637,14 +633,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     }
 
     speak();
-  }, [avatarSpeech, data?.sessionId]);
+  }, [avatarSpeech, sessionInfo?.session_id, sessionToken]);
 
   // Bind the vision camera stream to the small overlay video when present
   useEffect(() => {
     if (visionVideoRef.current && visionCameraStream) {
       visionVideoRef.current.srcObject = visionCameraStream;
       visionVideoRef.current.onloadedmetadata = () => {
-        try { visionVideoRef.current && visionVideoRef.current.play(); } catch { }
+        try { if (visionVideoRef.current) { visionVideoRef.current.play(); } } catch (e) { console.debug('vision video play failed', e); }
       };
     }
   }, [visionCameraStream]);
@@ -770,215 +766,164 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, [isVisionMode, visionCameraStream, isAiProcessing]);
 
 
-  // Greeting effect - fallback to play greeting if it wasn't triggered in startAvatar
+  // Greeting effect - fallback to play greeting if it wasn't triggered in initialization
   useEffect(() => {
-    if (isAvatarRunning && data?.sessionId && !hasGreeted && avatar.current) {
-      // Add a longer delay as fallback in case startAvatar didn't trigger it
+    if (isAvatarRunning && sessionInfo?.session_id && sessionToken && !hasGreeted) {
+      // Reduced delay fallback in case initialization didn't trigger it
       const greetingTimeout = setTimeout(() => {
         setHasGreeted(prev => {
           if (!prev) {
             const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
             greetingRef.current = greeting;
             greetingRetryCountRef.current = 0;
+            // Send directly via API to override any default opening text
+            sendStreamingTask(sessionToken, sessionInfo.session_id, greeting, 'repeat').catch(err => {
+              console.error('Failed to send fallback greeting:', err);
+            });
             setAvatarSpeech(greeting);
             return true;
           }
           return prev;
         });
-      }, 3000); // Wait 3 seconds as fallback
+      }, 1500); // Reduced from 3000ms - faster fallback
 
       return () => clearTimeout(greetingTimeout);
     }
-  }, [isAvatarRunning, data?.sessionId, hasGreeted]);
+  }, [isAvatarRunning, sessionInfo?.session_id, sessionToken, hasGreeted]);
 
-  // useEffect called when the component mounts, to fetch the accessToken and automatically start the avatar
+  // On mount: fetch token, create session, connect LiveKit, start session
   useEffect(() => {
     async function initializeAndStartAvatar() {
       try {
+        setStartAvatarLoading(true);
         const response = await getAccessToken();
         const token = response.data.data.token;
+        setSessionToken(token);
 
-        if (!avatar.current) {
-          avatar.current = new StreamingAvatarApi(
-            new Configuration({
-              accessToken: token,
-              basePath: '/api/heygen'
-            })
-          );
+        const avatarId = import.meta.env.VITE_HEYGEN_AVATARID;
+        const voiceId = import.meta.env.VITE_HEYGEN_VOICEID;
+        if (!avatarId || !voiceId) {
+          setStartAvatarLoading(false);
+          toast({
+            variant: "destructive",
+            title: "Missing Configuration",
+            description: 'Missing HeyGen environment variables. Please check VITE_HEYGEN_AVATARID and VITE_HEYGEN_VOICEID in your .env file.',
+          });
+          return;
         }
-        console.log(avatar.current)
-        // Clear any existing event handlers to prevent duplication
-        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
-        avatar.current.addEventHandler("avatar_stop_talking", handleAvatarStopTalking);
 
-        // Automatically start the avatar
-        await startAvatar();
+        // Create session via REST
+        const created = await createStreamingSession(token, {
+          avatar_name: avatarId,
+          voice_id: voiceId,
+          quality: 'high',
+          video_encoding: 'H264',
+        });
+        setSessionInfo(created);
 
-      } catch (error: any) {
+        // Setup LiveKit room
+        const room = new Room({
+          adaptiveStream: true,
+          dynacast: true,
+          videoCaptureDefaults: {
+            resolution: VideoPresets.h720.resolution,
+          },
+        });
+        livekitRoomRef.current = room;
+
+        // Aggregate remote media tracks into a single MediaStream
+        const combinedStream = new MediaStream();
+        room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+          if (track.kind === 'video' || track.kind === 'audio') {
+            combinedStream.addTrack(track.mediaStreamTrack);
+            if (
+              combinedStream.getVideoTracks().length > 0 &&
+              combinedStream.getAudioTracks().length > 0
+            ) {
+              setStream(combinedStream);
+            }
+          }
+        });
+        room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+          const mediaTrack = track.mediaStreamTrack;
+          if (mediaTrack) {
+            combinedStream.removeTrack(mediaTrack);
+          }
+        });
+
+        // Prepare then start
+        await room.prepareConnection(created.url, created.access_token);
+        await startStreamingSession(token, created.session_id);
+        await room.connect(created.url, created.access_token);
+
+        setIsAvatarRunning(true);
+        setStartAvatarLoading(false);
+
+        // Send greeting IMMEDIATELY to override any default opening text
+        // First interrupt any default speech, then send our greeting
+        setTimeout(async () => {
+          setHasGreeted(prev => {
+            if (!prev) {
+              const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
+              greetingRef.current = greeting;
+              greetingRetryCountRef.current = 0;
+              
+              // Interrupt any default opening text first, then send our greeting
+              sendStreamingTask(token, created.session_id, '', 'interrupt')
+                .then(() => {
+                  // After interrupt, immediately send our greeting
+                  setTimeout(() => {
+                    setAvatarSpeech(greeting);
+                  }, 100);
+                })
+                .catch(err => {
+                  console.error('Failed to interrupt default speech:', err);
+                  // Still send greeting even if interrupt fails
+                  setAvatarSpeech(greeting);
+                });
+              
+              return true;
+            }
+            return prev;
+          });
+        }, 300); // Small delay to ensure session is ready, but fast enough to override default
+
+      } catch (error: unknown) {
         console.error("Error initializing avatar:", error);
+        setStartAvatarLoading(false);
+        const errMsg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message || (error as Error).message;
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
-          description: error.response.data.message || error.message,
-        })
+          description: errMsg,
+        });
       }
     }
 
     initializeAndStartAvatar();
 
     return () => {
-      // Cleanup event handler and timeout
-      if (avatar.current) {
-        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
-      }
       clearTimeout(timeout);
-    }
+      try {
+        livekitRoomRef.current?.disconnect();
+      } catch (e) { console.debug('cleanup error', e); }
+    };
 
   }, []);
 
-  // Avatar stop talking event handler
-  const handleAvatarStopTalking = (e: any) => {
-    console.log("Avatar stopped talking", e);
-    // Only auto-start listening if user is not already listening and not processing AI
-    if (!isListening && !isAiProcessing) {
-      timeout = setTimeout(async () => {
-        try {
-          // Check if microphone is available before starting
-          await navigator.mediaDevices.getUserMedia({ audio: true });
-          console.log("Auto-starting speech recognition...");
-          handleStartListening();
-        } catch (error: any) {
-          console.log("Microphone not available, skipping auto-start listening:", error.message);
-          // Don't show error toast for auto-start failures, just log it
-        }
-      }, 2000);
-    }
-  };
-
-
-  // Function to start the avatar (extracted from grab function)
-  async function startAvatar() {
-    setStartAvatarLoading(true);
-    setIsAvatarFullScreen(true);
-
-    // Check if required environment variables are present
-    const avatarId = import.meta.env.VITE_HEYGEN_AVATARID;
-    const voiceId = import.meta.env.VITE_HEYGEN_VOICEID;
-
-    if (!avatarId || !voiceId) {
-      setStartAvatarLoading(false);
-      toast({
-        variant: "destructive",
-        title: "Missing Configuration",
-        description: 'Missing HeyGen environment variables. Please check VITE_HEYGEN_AVATARID and VITE_HEYGEN_VOICEID in your .env file.',
-      });
-      return;
-    }
-
-    try {
-      // Add error handling for the streaming API
-      const res = await avatar.current!.createStartAvatar(
-        {
-          newSessionRequest: {
-            quality: "high",
-            avatarName: avatarId,
-            voice: { voiceId: voiceId }
-          }
-        },
-      );
-      console.log('Avatar session created:', res);
-
-      // Set up the media stream with proper error handling
-      if (avatar.current?.mediaStream) {
-        setData(res);
-        setStream(avatar.current.mediaStream);
-        setStartAvatarLoading(false);
-        setIsAvatarRunning(true);
-        console.log('Avatar started successfully');
-
-        // Try to play immediately after a micro delay to ensure DOM is updated
-        setTimeout(() => {
-          playVideo();
-        }, 10);
-
-        // Trigger greeting after a delay to ensure session is ready
-        setTimeout(() => {
-          setHasGreeted(prev => {
-            if (!prev) {
-              const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
-              greetingRef.current = greeting;
-              greetingRetryCountRef.current = 0;
-              setAvatarSpeech(greeting);
-              return true;
-            }
-            return prev;
-          });
-        }, 2500); // Wait 2.5 seconds for session to be fully ready
-      } else {
-        throw new Error('Media stream not available');
-      }
-
-    } catch (error: any) {
-      console.error('Error starting avatar:', error);
-      console.error('Error details:', {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-        avatarId: avatarId,
-        voiceId: voiceId
-      });
-      setStartAvatarLoading(false);
-
-      let errorMessage = 'Failed to start avatar. Please check your HeyGen configuration.';
-      if (error.response?.status === 400) {
-        errorMessage = 'Invalid avatar or voice configuration. Please check your HeyGen avatar and voice IDs.';
-      } else if (error.response?.status === 401) {
-        errorMessage = 'Invalid HeyGen API key. Please check your authentication.';
-      } else if (error.response?.status === 404) {
-        errorMessage = 'Avatar or voice not found. Please check your HeyGen configuration.';
-      } else if (error.message?.includes('debugStream')) {
-        errorMessage = 'Streaming connection error. Please try refreshing the page.';
-      }
-
-      toast({
-        variant: "destructive",
-        title: "Error starting avatar",
-        description: errorMessage,
-      })
-    }
-  }
+  // SDK-specific handlers removed; LiveKit/REST flow handles media and speaking
 
 
 
-  // Function to stop the avatar's speech
+  // Function to stop the avatar's speech (via REST interrupt task)
   const stopAvatarSpeech = async () => {
     try {
-      if (avatar.current && data?.sessionId) {
-        // Use the interrupt method to stop current speech without ending the session
-        await avatar.current.interrupt({
-          interruptRequest: {
-            sessionId: data.sessionId
-          }
-        });
-
-        // Clear the speech text
-        setAvatarSpeech('');
-
-        toast({
-          title: "Speech Stopped",
-          description: "Avatar has stopped talking",
-        });
-      } else {
-        // If no active session, just clear the speech text
-        setAvatarSpeech('');
-        toast({
-          title: "Speech Stopped",
-          description: "Avatar has stopped talking",
-        });
+      if (sessionInfo?.session_id && sessionToken) {
+        await sendStreamingTask(sessionToken, sessionInfo.session_id, '', 'interrupt');
       }
     } catch (error) {
-      console.error('Error stopping avatar speech:', error);
-      // Even if API call fails, clear the speech text
+      console.error('Error sending interrupt task:', error);
+    } finally {
       setAvatarSpeech('');
       toast({
         title: "Speech Stopped",
@@ -1018,12 +963,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         await mediaStream.current.play();
         console.log('Video started playing successfully');
         setVideoNeedsInteraction(false);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('Error playing video:', error);
-        if (error.name === 'NotAllowedError') {
+        type NamedError = { name?: string };
+        const e = error as NamedError;
+        if (e?.name === 'NotAllowedError') {
           console.log('Autoplay blocked, video will play when user interacts with the page');
           setVideoNeedsInteraction(true);
-        } else if (error.name === 'AbortError') {
+        } else if (e?.name === 'AbortError') {
           console.log('Video play was aborted, this is usually normal');
         } else {
           // For other errors, try again after a short delay
