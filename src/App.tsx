@@ -1,13 +1,12 @@
-/*eslint-disable */
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useRef, useState } from 'react';
 import OpenAI from 'openai';
-import StreamingAvatar, { AvatarQuality, StartAvatarResponse } from '@heygen/streaming-avatar';
+import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/streaming-avatar';
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
 import { Loader2 } from 'lucide-react';
-import { WhisperRecognitionService } from './utils/whisperRecognition';
+import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 
 interface ChatMessageType {
@@ -26,7 +25,7 @@ function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [avatarSpeech, setAvatarSpeech] = useState<string>('');
   const [stream, setStream] = useState<MediaStream>();
-  const [data, setData] = useState<StartAvatarResponse>();
+  const [data, setData] = useState<NewSessionData>();
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
   const mediaStream = useRef<HTMLVideoElement>(null);
   const visionVideoRef = useRef<HTMLVideoElement>(null);
@@ -35,8 +34,8 @@ function App() {
   const lastSampleImageDataRef = useRef<ImageData | null>(null);
   const stabilityStartRef = useRef<number | null>(null);
   const nextAllowedAnalysisAtRef = useRef<number>(0);
-  const avatar = useRef<StreamingAvatar | null>(null);
-  const speechService = useRef<WhisperRecognitionService | null>(null);
+  const avatar = useRef<StreamingAvatarApi | null>(null);
+  const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
@@ -94,9 +93,10 @@ function App() {
   let timeout: any;
 
 
-  const apiKey: any = import.meta.env.VITE_OPENAI_API_KEY;
+  const apiKey: any = import.meta.env.VITE_XAI_API_KEY;
   const openai = new OpenAI({
     apiKey: apiKey,
+    baseURL: "https://api.x.ai/v1",
     dangerouslyAllowBrowser: true,
   });
 
@@ -138,9 +138,9 @@ function App() {
       // Set loading state
       setIsAiProcessing(true);
 
-      // Get AI response using OpenAI with full conversation context
+      // Get AI response using xAI with full conversation context
       const aiResponse = await openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'grok-2-latest',
         messages: [
           { 
             role: 'system', 
@@ -337,7 +337,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       ];
 
       const aiResponse = await openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'grok-2-vision',
         messages: messages,
         temperature: 0.8,
         max_tokens: 2500
@@ -437,7 +437,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           ];
 
           aiResponse = await openai.chat.completions.create({
-            model: 'gpt-4o',
+            model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
             max_tokens: 2500
@@ -452,7 +452,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           }));
 
           aiResponse = await openai.chat.completions.create({
-            model: 'gpt-4o',
+            model: 'grok-2-latest',
             messages: [
               {
                 role: 'system' as const,
@@ -500,7 +500,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         }));
 
         aiResponse = await openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'grok-2-latest',
           messages: [
             {
               role: 'system' as const,
@@ -564,15 +564,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
   // Initialize speech recognition service
   useEffect(() => {
-    speechService.current = new WhisperRecognitionService(
+    speechService.current = new SpeechRecognitionService(
       handleSpeechResult,
-      handleSpeechError,
-      openai
+      handleSpeechError
     );
 
     return () => {
       if (speechService.current) {
-        speechService.current.cleanup();
+        speechService.current.stopListening();
       }
     };
   }, []);
@@ -603,9 +602,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
   useEffect(() => {
     async function speak() {
-      if (avatarSpeech && data?.session_id) {
+      if (avatarSpeech && data?.sessionId) {
         try {
-          await avatar.current?.speak({ text: avatarSpeech });
+          await avatar.current?.speak({ taskRequest: { text: avatarSpeech, sessionId: data?.sessionId } });
         } catch (err: any) {
           console.error(err);
         }
@@ -613,7 +612,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     }
 
     speak();
-  }, [avatarSpeech, data?.session_id]);
+  }, [avatarSpeech, data?.sessionId]);
 
   // Bind the vision camera stream to the small overlay video when present
   useEffect(() => {
@@ -754,14 +753,17 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         const token = response.data.data.token;
 
         if (!avatar.current) {
-          avatar.current = new StreamingAvatar({
-            token: token
-          });
+          avatar.current = new StreamingAvatarApi(
+            new Configuration({ 
+              accessToken: token,
+              basePath: '/api/heygen'
+            })
+          );
         }
         console.log(avatar.current)
         // Clear any existing event handlers to prevent duplication
-        avatar.current.off("avatar_stop_talking", handleAvatarStopTalking);
-        avatar.current.on("avatar_stop_talking", handleAvatarStopTalking);
+        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
+        avatar.current.addEventHandler("avatar_stop_talking", handleAvatarStopTalking);
 
         // Automatically start the avatar
         await startAvatar();
@@ -781,7 +783,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     return () => {
       // Cleanup event handler and timeout
       if (avatar.current) {
-        avatar.current.off("avatar_stop_talking", handleAvatarStopTalking);
+        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
       }
       clearTimeout(timeout);
     }
@@ -829,11 +831,15 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
     try {
       // Add error handling for the streaming API
-      const res = await avatar.current!.createStartAvatar({
-        quality: AvatarQuality.High,
-        avatarName: avatarId,
-        voice: { voiceId: voiceId }
-      });
+      const res = await avatar.current!.createStartAvatar(
+        {
+          newSessionRequest: {
+            quality: "high",
+            avatarName: avatarId,
+            voice: { voiceId: voiceId }
+          }
+        },
+      );
       console.log('Avatar session created:', res);
       
       // Set up the media stream with proper error handling
@@ -887,9 +893,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to stop the avatar's speech
   const stopAvatarSpeech = async () => {
     try {
-      if (avatar.current && data?.session_id) {
+      if (avatar.current && data?.sessionId) {
         // Use the interrupt method to stop current speech without ending the session
-        await avatar.current.interrupt();
+        await avatar.current.interrupt({ 
+          interruptRequest: { 
+            sessionId: data.sessionId 
+          } 
+        });
         
         // Clear the speech text
         setAvatarSpeech('');

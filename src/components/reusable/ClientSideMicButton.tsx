@@ -1,21 +1,20 @@
 import { FaMicrophone, FaMicrophoneSlash } from 'react-icons/fa';
-import { WhisperRecognitionService } from '../../utils/whisperRecognition';
+import { SpeechRecognitionService } from '../../utils/speechRecognition';
 import { useState, useEffect, useRef } from 'react';
 
 interface ClientSideMicButtonProps {
   onTranscription: (text: string) => void;
   onError: (error: string) => void;
-  openai: any;
   className?: string;
 }
 
-const ClientSideMicButton = ({ onTranscription, onError, openai, className = '' }: ClientSideMicButtonProps) => {
+const ClientSideMicButton = ({ onTranscription, onError, className = '' }: ClientSideMicButtonProps) => {
   const [isListening, setIsListening] = useState(false);
-  const speechService = useRef<WhisperRecognitionService | null>(null);
+  const speechService = useRef<SpeechRecognitionService | null>(null);
 
   useEffect(() => {
     // Initialize speech recognition service
-    speechService.current = new WhisperRecognitionService(
+    speechService.current = new SpeechRecognitionService(
       (text: string) => {
         onTranscription(text);
         setIsListening(false);
@@ -23,16 +22,15 @@ const ClientSideMicButton = ({ onTranscription, onError, openai, className = '' 
       (error: string) => {
         onError(error);
         setIsListening(false);
-      },
-      openai
+      }
     );
 
     return () => {
       if (speechService.current) {
-        speechService.current.cleanup();
+        speechService.current.stopListening();
       }
     };
-  }, [onTranscription, onError, openai]);
+  }, [onTranscription, onError]);
 
   const handleMicClick = () => {
     if (!speechService.current) return;

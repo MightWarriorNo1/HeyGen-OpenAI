@@ -1,11 +1,11 @@
 # Real-Time Avatar Interaction
 
-Welcome to the Real-Time Avatar Interaction project! This application creates an interactive experience between the user and a real-time avatar using Hygen's advanced avatar technology and OpenAI's language model. The project enables users to converse with an avatar in real-time, converting speech to text using OpenAI's Whisper API and generating responses through OpenAI's GPT-4o.
+Welcome to the Real-Time Avatar Interaction project! This application creates an interactive experience between the user and a real-time avatar using Hygen's advanced avatar technology and OpenAI's language model. The project enables users to converse with an avatar in real-time, converting speech to text and generating responses through OpenAI's GPT-3.5-turbo.
 
 ## Features
 
 - **Real-Time Interaction:** Engage in live conversations with a virtual avatar.
-- **Speech-to-Text Conversion:** Convert spoken words into text using OpenAI's Whisper API.
+- **Speech-to-Text Conversion:** Convert spoken words into text using OpenAI's GPT-3.5-turbo.
 - **Avatar Responses:** Receive responses from the avatar based on the text input.
 - **Seamless Experience:** Enjoy a fluid interaction where the avatar's responses are delivered in real-time.
 
@@ -15,7 +15,7 @@ Welcome to the Real-Time Avatar Interaction project! This application creates an
 - **TypeScript:** To enhance code quality and maintainability.
 - **Tailwind CSS:** For styling and creating a responsive design.
 - **Shadcn:** For additional UI components and enhancements.
-- **OpenAI:** For text generation using GPT-4o and speech recognition using Whisper API.
+- **OpenAI:** For text generation and processing using GPT-3.5-turbo.
 - **Streaming Avatar API:** To integrate and control the avatar's real-time responses.
 
 
@@ -43,8 +43,8 @@ To get started with the project locally, follow these steps:
 
    Create a `.env` file in the root directory with the following variables:
    ```env
-   # OpenAI API Configuration
-   VITE_OPENAI_API_KEY=your_openai_api_key_here
+   # xAI API Configuration
+   VITE_XAI_API_KEY=your_xai_api_key_here
    
    # HeyGen API Configuration
    VITE_HEYGEN_API_KEY=your_heygen_api_key_here
