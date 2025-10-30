@@ -4,18 +4,15 @@ export class SpeechRecognitionService {
   private isListening: boolean = false;
   private onResult: (text: string) => void;
   private onError: (error: string) => void;
-  private onInterimResult?: (hasSpeech: boolean) => void; // Callback for when user starts/stops speaking
   private accumulatedText: string = '';
   private speechTimeout: any = null;
+  private onSpeechStart?: () => void;
+  private isSuspended: boolean = false;
 
-  constructor(
-    onResult: (text: string) => void, 
-    onError: (error: string) => void,
-    onInterimResult?: (hasSpeech: boolean) => void
-  ) {
+  constructor(onResult: (text: string) => void, onError: (error: string) => void, onSpeechStart?: () => void) {
     this.onResult = onResult;
     this.onError = onError;
-    this.onInterimResult = onInterimResult;
+    this.onSpeechStart = onSpeechStart;
     this.initializeRecognition();
   }
 
@@ -42,7 +39,24 @@ export class SpeechRecognitionService {
       console.log('Speech recognition started');
     };
 
+    // Fire as soon as browser detects user speech
+    this.recognition.onspeechstart = () => {
+      if (this.onSpeechStart) {
+        try {
+          this.onSpeechStart();
+        } catch (err) {
+          // Swallow to avoid breaking recognition flow
+          console.error('onSpeechStart handler error:', err);
+        }
+      }
+    };
+
     this.recognition.onresult = (event: any) => {
+      // If suspended (e.g., avatar is talking), ignore all results
+      if (this.isSuspended) {
+        this.clearAccumulatedText();
+        return;
+      }
       let interimTranscript = '';
       let finalTranscript = '';
       
@@ -54,12 +68,6 @@ export class SpeechRecognitionService {
         } else {
           interimTranscript += transcript;
         }
-      }
-      
-      // Notify when user is speaking (interim results detected)
-      if (this.onInterimResult) {
-        const hasInterimSpeech = interimTranscript.trim().length > 0;
-        this.onInterimResult(hasInterimSpeech);
       }
       
       // Update accumulated text with final results
@@ -78,6 +86,14 @@ export class SpeechRecognitionService {
       
       // Clear any existing timeout and set a new one for interim results
       if (interimTranscript.trim().length > 0) {
+        // Fallback: if onspeechstart isn't supported, treat interim as speech start signal
+        if (this.onSpeechStart) {
+          try {
+            this.onSpeechStart();
+          } catch (err) {
+            console.error('onSpeechStart handler error:', err);
+          }
+        }
         if (this.speechTimeout) {
           clearTimeout(this.speechTimeout);
         }
@@ -88,10 +104,6 @@ export class SpeechRecognitionService {
             console.log('Speech timeout reached, processing accumulated text:', this.accumulatedText);
             this.onResult(this.accumulatedText.trim());
             this.accumulatedText = '';
-          }
-          // Notify that user stopped speaking
-          if (this.onInterimResult) {
-            this.onInterimResult(false);
           }
         }, 2000); // 2 seconds of silence before processing
       }
@@ -131,7 +143,7 @@ export class SpeechRecognitionService {
       this.clearAccumulatedText(); // Clear any accumulated text on error
       
       // Auto-restart for recoverable errors
-      if (shouldRestart) {
+      if (shouldRestart && !this.isSuspended) {
         setTimeout(() => {
           if (!this.isListening) {
             console.log('Auto-restarting speech recognition after error...');
@@ -154,13 +166,13 @@ export class SpeechRecognitionService {
       
       // Automatically restart listening after a short delay
       setTimeout(() => {
-        if (!this.isListening) {
+        if (!this.isListening && !this.isSuspended) {
           console.log('Auto-restarting speech recognition from onend...');
           this.startListening().catch((error) => {
             console.error('Failed to restart speech recognition:', error);
             // Try again after a longer delay if restart fails
             setTimeout(() => {
-              if (!this.isListening) {
+              if (!this.isListening && !this.isSuspended) {
                 this.startListening().catch(console.error);
               }
             }, 3000);
@@ -171,10 +183,16 @@ export class SpeechRecognitionService {
   }
 
   public async startListening(): Promise<void> {
-    if (this.recognition && !this.isListening) {
+    if (this.recognition && !this.isListening && !this.isSuspended) {
       try {
         // Request microphone permission first
-        await navigator.mediaDevices.getUserMedia({ audio: true });
+        await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
         console.log('Starting speech recognition...');
         this.recognition.start();
       } catch (error: any) {
@@ -198,6 +216,26 @@ export class SpeechRecognitionService {
     if (this.recognition && this.isListening) {
       this.recognition.stop();
     }
+  }
+
+  // Temporarily suspend recognition and prevent auto-restarts/results
+  public suspend(): void {
+    this.isSuspended = true;
+    if (this.recognition && this.isListening) {
+      try {
+        this.recognition.abort();
+      } catch {
+        // ignore
+      }
+    }
+    this.isListening = false;
+    this.clearAccumulatedText();
+  }
+
+  // Resume recognition after suspension
+  public resume(): void {
+    this.isSuspended = false;
+    this.startListening().catch(console.error);
   }
 
   public isCurrentlyListening(): boolean {

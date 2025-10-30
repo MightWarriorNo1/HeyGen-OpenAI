@@ -1,11 +1,11 @@
 import { useToast } from "@/hooks/use-toast";
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import OpenAI from 'openai';
-import { Room, RoomEvent, VideoPresets, RemoteTrack } from 'livekit-client';
-import { getAccessToken, createStreamingSession, startStreamingSession, sendStreamingTask, HeyGenSessionInfo } from './services/api';
+import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/streaming-avatar';
+import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Camera, Loader2, Paperclip } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 
@@ -16,6 +16,8 @@ interface ChatMessageType {
     file: File;
     type: 'photo' | 'video';
   };
+  // Optional key to link this message to a background media analysis entry
+  mediaKey?: string;
 };
 
 function App() {
@@ -25,9 +27,9 @@ function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [avatarSpeech, setAvatarSpeech] = useState<string>('');
   const [stream, setStream] = useState<MediaStream>();
-  const [sessionInfo, setSessionInfo] = useState<HeyGenSessionInfo | undefined>();
-  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [data, setData] = useState<NewSessionData>();
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const mediaStream = useRef<HTMLVideoElement>(null);
   const visionVideoRef = useRef<HTMLVideoElement>(null);
   const [visionCameraStream, setVisionCameraStream] = useState<MediaStream | null>(null);
@@ -35,19 +37,23 @@ function App() {
   const lastSampleImageDataRef = useRef<ImageData | null>(null);
   const stabilityStartRef = useRef<number | null>(null);
   const nextAllowedAnalysisAtRef = useRef<number>(0);
-  const livekitRoomRef = useRef<Room | null>(null);
+  const avatar = useRef<StreamingAvatarApi | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const greetingRef = useRef<string | null>(null);
-  const greetingRetryCountRef = useRef<number>(0);
-  const isStoppingRef = useRef<boolean>(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const shouldStopOnUserSpeechRef = useRef<boolean>(false);
+  // Store background media analysis results keyed by a generated mediaKey
+  const [mediaAnalyses, setMediaAnalyses] = useState<Record<string, {
+    type: 'photo' | 'video';
+    fileName: string;
+    status: 'processing' | 'ready' | 'error';
+    analysisText?: string;
+    errorMessage?: string;
+  }>>({});
+  const [latestMediaKey, setLatestMediaKey] = useState<string | null>(null);
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
+  const isAvatarSpeakingRef = useRef<boolean>(false);
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
-  const [hasGreeted, setHasGreeted] = useState<boolean>(false);
   const [chatMessages, setChatMessages] = useState<ChatMessageType[]>([
     // {
     //   role: 'user',
@@ -97,11 +103,10 @@ function App() {
   const [startAvatarLoading, setStartAvatarLoading] = useState<boolean>(false);
   const [isAvatarRunning, setIsAvatarRunning] = useState<boolean>(false);
   const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
-  const [isStopping, setIsStopping] = useState<boolean>(false);
-  let timeout: number | undefined;
+  let timeout: any;
 
 
-  const apiKey: string | undefined = import.meta.env.VITE_XAI_API_KEY;
+  const apiKey: any = import.meta.env.VITE_XAI_API_KEY;
   const openai = new OpenAI({
     apiKey: apiKey,
     baseURL: "https://api.x.ai/v1",
@@ -147,12 +152,74 @@ function App() {
       setIsAiProcessing(true);
 
       // Get AI response using xAI with full conversation context
+      // Build optional media context if latest media analysis is ready
+      const mediaContextMessage = (() => {
+        if (!latestMediaKey) return null;
+        const analysis = mediaAnalyses[latestMediaKey];
+        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) return null;
+        return {
+          role: 'system' as const,
+          content: `Context: Recent ${analysis.type} "${analysis.fileName}" analysis is available.\n\n${analysis.analysisText}\n\nUse this when answering questions about the latest uploaded media.`
+        };
+      })();
+
+      // If user asks to describe the uploaded media, use background analysis workflow
+      const wantsMediaDescription = /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain)\b.*\b(image|photo|picture|pic)\b/i.test(transcript)
+        || /describe about the image/i.test(transcript);
+
+      if (wantsMediaDescription) {
+        const latest = getLatestMediaMessage();
+        const mediaInfo = latest && (latest as any).media as { file: File; type: 'photo' | 'video' } | undefined;
+        const fileName = mediaInfo?.file?.name || 'the uploaded file';
+        const analysis = latestMediaKey ? mediaAnalyses[latestMediaKey] : undefined;
+
+        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) {
+          const waitMsg = `I'm still analyzing "${fileName}". Please wait a moment.`;
+          setChatMessages(prev => [...prev, { role: 'assistant', message: waitMsg }]);
+          setAvatarSpeech(waitMsg);
+          setIsAiProcessing(false);
+          return;
+        }
+
+        // Use stored analysis to answer
+        const conversationHistory = updatedMessages.map(msg => ({
+          role: msg.role as 'user' | 'assistant',
+          content: (msg as any).media ? `${msg.message} [${(msg as any).media.type.toUpperCase()}: ${(msg as any).media.file.name}]` : msg.message
+        }));
+
+        const messagesForAnswer = [
+          {
+            role: 'system' as const,
+            content: `You are iSolveUrProblems, a hilariously helpful AI assistant...`
+          },
+          {
+            role: 'system' as const,
+            content: `Context: Analysis for "${analysis.fileName}" is available.\n\n${analysis.analysisText}\n\nBase your answer on this analysis when responding to the user's request.`
+          },
+          ...conversationHistory,
+          { role: 'user' as const, content: transcript }
+        ];
+
+        const aiResponse = await openai.chat.completions.create({
+          model: 'grok-2-latest',
+          messages: messagesForAnswer,
+          temperature: 0.8,
+          max_tokens: 100
+        });
+
+        const aiMessage = aiResponse.choices[0].message.content || '';
+        setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
+        setAvatarSpeech(aiMessage);
+        setIsAiProcessing(false);
+        return;
+      }
+
       const aiResponse = await openai.chat.completions.create({
         model: 'grok-2-latest',
         messages: [
           {
             role: 'system',
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+            content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -178,6 +245,8 @@ RESPONSE STYLE:
 
 Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
           },
+          // Inject media analysis context just before conversation turns
+          ...(mediaContextMessage ? [mediaContextMessage] : []),
           ...updatedMessages.map(msg => {
             if (msg.media) {
               return {
@@ -189,7 +258,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           })
         ],
         temperature: 0.8,
-        max_tokens: 300
+        max_tokens: 100
       });
 
       const aiMessage = aiResponse.choices[0].message.content || '';
@@ -200,13 +269,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Clear loading state
       setIsAiProcessing(false);
-      } catch (error: unknown) {
+    } catch (error: any) {
       console.error('Error processing speech result:', error);
       setIsAiProcessing(false);
       toast({
         variant: "destructive",
         title: "Uh oh! Something went wrong.",
-          description: (error as Error).message,
+        description: error.message,
       });
     }
   };
@@ -221,134 +290,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     });
     setIsListening(false);
   };
-
-  // Store stopAvatarSpeech reference so it can be accessed by the callback
-  const stopAvatarSpeechRef = useRef<(() => Promise<void>) | null>(null);
-  
-  // Function to stop the avatar's speech (via REST task)
-  // Use 'chat' task type which may interrupt better than 'repeat'
-  const stopAvatarSpeech = useCallback(async () => {
-    try {
-      if (sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
-        // Set flags immediately to prevent new speech tasks and show loading state
-        isStoppingRef.current = true;
-        setIsStopping(true);
-        
-        // Cancel any pending API requests
-        if (abortControllerRef.current) {
-          abortControllerRef.current.abort();
-          abortControllerRef.current = null;
-        }
-        
-        // Clear avatar speech immediately to prevent useEffect from sending new tasks
-        setAvatarSpeech('');
-        
-        // Temporarily mute/pause audio to stop buffered speech immediately
-        // This provides instant client-side feedback while server interrupts process
-        let wasMuted = false;
-        let wasPaused = false;
-        if (mediaStream.current) {
-          wasMuted = mediaStream.current.muted;
-          wasPaused = mediaStream.current.paused;
-          // Mute immediately for instant feedback
-          mediaStream.current.muted = true;
-          // Brief pause to stop buffered audio
-          if (!wasPaused) {
-            mediaStream.current.pause();
-          }
-        }
-        
-        // Send multiple rapid interrupt tasks using 'chat' type
-        // 'chat' type typically interrupts active speech better than 'repeat'
-        const interruptPromises = [];
-        try {
-          // Send interrupts simultaneously (fire and forget pattern for speed)
-          for (let i = 0; i < 5; i++) {
-            const interruptController = new AbortController();
-            interruptPromises.push(
-              sendStreamingTask(sessionToken, sessionInfo.session_id, '.', 'chat', interruptController.signal)
-                .catch(e => {
-                  if (e?.name !== 'AbortError' && e?.code !== 'ERR_CANCELED') {
-                    console.error(`Interrupt task ${i + 1} error:`, e);
-                  }
-                })
-            );
-          }
-          
-          // Wait for interrupts to be sent (don't wait for all to complete)
-          await Promise.allSettled(interruptPromises.slice(0, 2)); // Wait for at least 2
-          
-        } catch (e: any) {
-          // Ignore abort errors (they're expected)
-          if (e?.name !== 'AbortError' && e?.code !== 'ERR_CANCELED') {
-            console.error('Error sending interrupt tasks:', e);
-          }
-        }
-        
-        // Restore audio after brief moment (allows server interrupts to take effect)
-        if (mediaStream.current) {
-          setTimeout(() => {
-            if (mediaStream.current) {
-              mediaStream.current.muted = wasMuted;
-              if (!wasPaused && !isStoppingRef.current) {
-                mediaStream.current.play().catch(console.error);
-              }
-            }
-          }, 300); // Brief delay to let server process interrupts
-        }
-        
-        // Reset flags after a delay to allow for cleanup
-        setTimeout(() => {
-          isStoppingRef.current = false;
-          setIsStopping(false);
-        }, 300);
-        
-        toast({
-          title: "Speech Stopped",
-          description: "Avatar has stopped talking",
-        });
-      }
-    } catch (error) {
-      console.error('Error stopping avatar speech:', error);
-      isStoppingRef.current = false;
-      setIsStopping(false);
-      // Restore audio on error
-      if (mediaStream.current) {
-        mediaStream.current.muted = false;
-        mediaStream.current.play().catch(console.error);
-      }
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to stop avatar speech",
-      });
-    }
-  }, [sessionInfo?.session_id, sessionToken]);
-
-  // Update ref when stopAvatarSpeech changes
-  useEffect(() => {
-    stopAvatarSpeechRef.current = stopAvatarSpeech;
-  }, [stopAvatarSpeech]);
-
-  // Function to handle interim speech results (when user starts speaking)
-  // This will be called when speech recognition detects interim (partial) results
-  const handleInterimSpeech = useCallback((hasSpeech: boolean) => {
-    // When user starts speaking (hasSpeech = true) and avatar is currently talking, stop avatar
-    // We check avatarSpeech through a ref to get latest value without re-creating callback
-    const currentAvatarSpeech = avatarSpeech;
-    if (hasSpeech && currentAvatarSpeech && currentAvatarSpeech.trim().length > 0 && !isStoppingRef.current) {
-      console.log('User started speaking while avatar is talking - stopping avatar');
-      // Use the ref to track so we don't call multiple times rapidly
-      if (!shouldStopOnUserSpeechRef.current && stopAvatarSpeechRef.current) {
-        shouldStopOnUserSpeechRef.current = true;
-        stopAvatarSpeechRef.current();
-        // Reset flag after a brief moment
-        setTimeout(() => {
-          shouldStopOnUserSpeechRef.current = false;
-        }, 500);
-      }
-    }
-  }, [avatarSpeech]);
 
   // Function to handle file uploads
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -365,16 +306,29 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           file.type.startsWith('video/') ? 'video' : null;
 
         if (fileType) {
+          const mediaKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
+          // Track latest media for future context
+          setLatestMediaKey(mediaKey);
+          // Initialize background analysis entry
+          setMediaAnalyses(prev => ({
+            ...prev,
+            [mediaKey]: {
+              type: fileType,
+              fileName: file.name,
+              status: 'processing'
+            }
+          }));
           // Add media message to chat immediately
           const mediaMessage: ChatMessageType = {
             role: 'user',
             message: `I uploaded a ${fileType}`,
-            media: { file, type: fileType }
+            media: { file, type: fileType },
+            mediaKey
           };
           setChatMessages(prev => [...prev, mediaMessage]);
 
-          // Process with AI
-          processMediaWithAI(file, fileType);
+          // Analyze in background (no immediate reply)
+          void processMediaWithAI(file, fileType, mediaKey);
         }
       });
 
@@ -382,9 +336,16 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       event.target.value = '';
 
       toast({
-        title: "Files processed",
-        description: `${newFiles.length} file(s) processed successfully`,
+        title: "Upload received",
+        description: `${newFiles.length} file(s) queued for analysis`,
       });
+
+      // Inform user that analysis is underway
+      const analyzingText = newFiles.length === 1
+        ? `I'm analyzing "${newFiles[0].name}" now. Please wait until analysis is completed...`
+        : `I'm analyzing your files now. Please wait until analysis is completed...`;
+      setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
+      setAvatarSpeech(analyzingText);
     }
   };
 
@@ -399,21 +360,26 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     });
   };
 
+  // NOTE: Video frame capture helper removed; current flow answers video questions from stored analysis.
+
+  // Helper to find the most relevant recent media message
+  const getLatestMediaMessage = (): ChatMessageType | null => {
+    // Prefer exact mediaKey match
+    if (latestMediaKey) {
+      const exact = [...chatMessages].reverse().find(m => (m as any).mediaKey === latestMediaKey && (m as any).media);
+      if (exact) return exact as any;
+    }
+    // Fallback: last message that has media
+    const anyMedia = [...chatMessages].reverse().find(m => (m as any).media);
+    return anyMedia || null;
+  };
+
   // Function to handle vision analysis from camera
   const handleVisionAnalysis = async (imageDataUrl: string) => {
     try {
-      // Enter vision mode
+      // Ensure we are in vision mode and throttle concurrent work
       setIsVisionMode(true);
-
-      // Set loading state
       setIsAiProcessing(true);
-
-      // Add user message to chat
-      const updatedMessages = [...chatMessages, {
-        role: 'user',
-        message: 'I want to analyze what I see through the camera'
-      }];
-      setChatMessages(updatedMessages);
 
       // Build conversation history for vision
       const conversationHistory = chatMessages.map(msg => ({
@@ -462,7 +428,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           content: [
             {
               type: 'text' as const,
-              text: 'I want to analyze what I see through the camera. Please provide a detailed analysis of the image and suggest solutions or insights based on what you observe.'
+              text: 'Analyze this camera frame. Provide concise observations and helpful context. Do not address the user; this is background analysis.'
             },
             {
               type: 'image_url' as const,
@@ -476,38 +442,41 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         model: 'grok-2-vision',
         messages: messages,
         temperature: 0.8,
-        max_tokens: 300
-      });
+        max_tokens: 100
+      } as any);
 
       const aiMessage = aiResponse.choices[0].message.content || '';
-      // Add AI response to chat
-      setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-      // Set avatar speech to AI message so avatar can speak it
-      setAvatarSpeech(aiMessage);
-
-      // Clear loading state
+      // Store the analysis in background; do not reply or speak until user asks
+      const mediaKey = `vision_${Date.now()}`;
+      setLatestMediaKey(mediaKey);
+      setMediaAnalyses(prev => ({
+        ...prev,
+        [mediaKey]: {
+          type: 'photo',
+          fileName: 'camera_frame',
+          status: 'ready',
+          analysisText: aiMessage
+        }
+      }));
       setIsAiProcessing(false);
 
-    } catch (error: unknown) {
+    } catch (error: any) {
       console.error('Error processing vision analysis:', error);
       setIsAiProcessing(false);
       setIsVisionMode(false); // Exit vision mode on error
       toast({
         variant: "destructive",
         title: "Vision Analysis Error",
-        description: (error as Error).message || 'Failed to analyze the image. Please try again.',
+        description: error.message || 'Failed to analyze the image. Please try again.',
       });
     }
   };
 
   // Receive live camera stream from CameraModal when vision starts
 
-  // Function to process media with AI
-  const processMediaWithAI = async (file: File, type: 'photo' | 'video') => {
+  // Function to process media with AI (background). Stores results instead of replying immediately
+  const processMediaWithAI = async (file: File, type: 'photo' | 'video', mediaKey: string) => {
     try {
-      // Set loading state
-      setIsAiProcessing(true);
-
       let aiResponse;
 
       if (type === 'photo') {
@@ -576,8 +545,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
-            max_tokens: 300
-          });
+            max_tokens: 100
+          } as any);
 
         } catch (visionError) {
           console.warn('Vision analysis failed, falling back to text-only:', visionError);
@@ -625,7 +594,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               }
             ],
             temperature: 0.8,
-            max_tokens: 300
+            max_tokens: 100
           });
         }
       } else {
@@ -673,25 +642,40 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ],
           temperature: 0.8,
-          max_tokens: 300
+          max_tokens: 100
         });
       }
-
       const aiMessage = aiResponse.choices[0].message.content || '';
-      // Add AI response to chat
-      setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-      // Set avatar speech to AI message so avatar can speak it
-      setAvatarSpeech(aiMessage);
+      // Store analysis in background store
+      setMediaAnalyses(prev => ({
+        ...prev,
+        [mediaKey]: {
+          type,
+          fileName: file.name,
+          status: 'ready',
+          analysisText: aiMessage
+        }
+      }));
 
-      // Clear loading state
-      setIsAiProcessing(false);
-    } catch (error: unknown) {
+      // Notify user that analysis is complete for this item
+      const doneText = `I've analyzed "${file.name}". What can I help you with about it?`;
+      setChatMessages(prev => [...prev, { role: 'assistant', message: doneText }]);
+      setAvatarSpeech(doneText);
+    } catch (error: any) {
       console.error('Error processing media with AI:', error);
-      setIsAiProcessing(false);
+      setMediaAnalyses(prev => ({
+        ...prev,
+        [mediaKey]: {
+          type,
+          fileName: file.name,
+          status: 'error',
+          errorMessage: error?.message || 'Failed to analyze media'
+        }
+      }));
       toast({
         variant: "destructive",
         title: "Error processing media",
-        description: (error as Error).message,
+        description: error.message,
       });
     }
   };
@@ -703,7 +687,25 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     speechService.current = new SpeechRecognitionService(
       handleSpeechResult,
       handleSpeechError,
-      handleInterimSpeech
+      async () => {
+        // User started speaking; if avatar is currently talking, interrupt immediately
+        if (isAvatarSpeakingRef.current) {
+          try {
+            if (avatar.current && data?.sessionId) {
+              await avatar.current.interrupt({
+                interruptRequest: {
+                  sessionId: data.sessionId
+                }
+              });
+            }
+          } catch (err) {
+            console.error('Interrupt failed (barge-in):', err);
+          } finally {
+            setAvatarSpeech('');
+            isAvatarSpeakingRef.current = false;
+          }
+        }
+      }
     );
 
     return () => {
@@ -711,7 +713,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         speechService.current.stopListening();
       }
     };
-  }, [handleInterimSpeech]); // Re-initialize when handleInterimSpeech changes (when avatarSpeech changes)
+  }, []);
 
   // Auto-start continuous listening when avatar is running
   useEffect(() => {
@@ -736,85 +738,30 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, [isAvatarRunning, isAiProcessing]);
 
 
-  // When avatarSpeech updates, send a talk task via HeyGen API
+  // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
   useEffect(() => {
-    // Early exit if speech is empty or stopping
-    if (!avatarSpeech || avatarSpeech.trim().length === 0 || isStoppingRef.current) {
-      // Cancel any pending request when clearing speech
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      return;
-    }
-    
     async function speak() {
-      // Double-check conditions after async gap
-      if (!avatarSpeech || avatarSpeech.trim().length === 0 || isStoppingRef.current) {
-        return;
-      }
-      
-      // Cancel any pending request first
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-      
-      // Create new AbortController for this request
-      const abortController = new AbortController();
-      abortControllerRef.current = abortController;
-      
-      if (avatarSpeech && sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
+      if (avatarSpeech && sessionId) {
         try {
-          await sendStreamingTask(sessionToken, sessionInfo.session_id, avatarSpeech, 'repeat', abortController.signal);
-          // Check again after request completes
-          if (isStoppingRef.current || !avatarSpeech) {
-            return;
-          }
-          if (greetingRef.current === avatarSpeech) {
-            greetingRef.current = null;
-            greetingRetryCountRef.current = 0;
-          }
-        } catch (err: unknown) {
-          // Ignore abort errors (they're expected when stopping)
-          if ((err as any)?.name === 'AbortError' || (err as any)?.code === 'ERR_CANCELED') {
-            console.log('Speech task aborted');
-            return;
-          }
-          console.error('Error sending talk task:', err);
-          if (greetingRef.current === avatarSpeech && greetingRetryCountRef.current < 3 && !isStoppingRef.current) {
-            greetingRetryCountRef.current += 1;
-            console.log(`Retrying greeting (attempt ${greetingRetryCountRef.current}/3)...`);
-            setTimeout(() => {
-              if (greetingRef.current && sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
-                setAvatarSpeech(greetingRef.current);
-              }
-            }, 2000);
-          } else if (greetingRef.current === avatarSpeech) {
-            console.log('Greeting failed after retries');
-            greetingRef.current = null;
-            greetingRetryCountRef.current = 0;
-          }
+          // Suspend speech recognition while avatar is speaking to avoid self-capture
+          speechService.current?.suspend();
+          isAvatarSpeakingRef.current = true;
+          await avatar.current?.speak({ taskRequest: { text: avatarSpeech, sessionId } });
+        } catch (err: any) {
+          console.error('Speak failed:', err);
         }
       }
     }
 
     speak();
-    
-    // Cleanup: abort on unmount or when dependencies change
-    return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-    };
-  }, [avatarSpeech, sessionInfo?.session_id, sessionToken]);
+  }, [avatarSpeech, sessionId]);
 
   // Bind the vision camera stream to the small overlay video when present
   useEffect(() => {
     if (visionVideoRef.current && visionCameraStream) {
       visionVideoRef.current.srcObject = visionCameraStream;
       visionVideoRef.current.onloadedmetadata = () => {
-        try { if (visionVideoRef.current) { visionVideoRef.current.play(); } } catch (e) { console.debug('vision video play failed', e); }
+        try { visionVideoRef.current && visionVideoRef.current.play(); } catch { }
       };
     }
   }, [visionCameraStream]);
@@ -940,154 +887,195 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, [isVisionMode, visionCameraStream, isAiProcessing]);
 
 
-  // Greeting effect - fallback to play greeting if it wasn't triggered in initialization
-  useEffect(() => {
-    if (isAvatarRunning && sessionInfo?.session_id && sessionToken && !hasGreeted) {
-      // Reduced delay fallback in case initialization didn't trigger it
-      const greetingTimeout = setTimeout(() => {
-        setHasGreeted(prev => {
-          if (!prev) {
-            const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
-            greetingRef.current = greeting;
-            greetingRetryCountRef.current = 0;
-            // Send directly via API to override any default opening text
-            sendStreamingTask(sessionToken, sessionInfo.session_id, greeting, 'repeat').catch(err => {
-              console.error('Failed to send fallback greeting:', err);
-            });
-            setAvatarSpeech(greeting);
-            return true;
-          }
-          return prev;
-        });
-      }, 1500); // Reduced from 3000ms - faster fallback
-
-      return () => clearTimeout(greetingTimeout);
-    }
-  }, [isAvatarRunning, sessionInfo?.session_id, sessionToken, hasGreeted]);
-
-  // On mount: fetch token, create session, connect LiveKit, start session
+  // useEffect called when the component mounts, to fetch the accessToken and automatically start the avatar
   useEffect(() => {
     async function initializeAndStartAvatar() {
       try {
-        setStartAvatarLoading(true);
         const response = await getAccessToken();
         const token = response.data.data.token;
-        setSessionToken(token);
 
-        const avatarId = import.meta.env.VITE_HEYGEN_AVATARID;
-        const voiceId = import.meta.env.VITE_HEYGEN_VOICEID;
-        if (!avatarId || !voiceId) {
-          setStartAvatarLoading(false);
-          toast({
-            variant: "destructive",
-            title: "Missing Configuration",
-            description: 'Missing HeyGen environment variables. Please check VITE_HEYGEN_AVATARID and VITE_HEYGEN_VOICEID in your .env file.',
-          });
-          return;
+        if (!avatar.current) {
+          avatar.current = new StreamingAvatarApi(
+            new Configuration({
+              accessToken: token,
+              basePath: '/api/heygen'
+            })
+          );
         }
+        console.log(avatar.current)
+        // Clear any existing event handlers to prevent duplication
+        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
+        avatar.current.addEventHandler("avatar_stop_talking", handleAvatarStopTalking);
 
-        // Create session via REST
-        const created = await createStreamingSession(token, {
-          avatar_name: avatarId,
-          voice_id: voiceId,
-          quality: 'high',
-          video_encoding: 'H264',
-        });
-        setSessionInfo(created);
+        // Automatically start the avatar
+        await startAvatar();
 
-        // Setup LiveKit room
-        const room = new Room({
-          adaptiveStream: true,
-          dynacast: true,
-          videoCaptureDefaults: {
-            resolution: VideoPresets.h720.resolution,
-          },
-        });
-        livekitRoomRef.current = room;
-
-        // Aggregate remote media tracks into a single MediaStream
-        const combinedStream = new MediaStream();
-        room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-          if (track.kind === 'video' || track.kind === 'audio') {
-            combinedStream.addTrack(track.mediaStreamTrack);
-            if (
-              combinedStream.getVideoTracks().length > 0 &&
-              combinedStream.getAudioTracks().length > 0
-            ) {
-              setStream(combinedStream);
-            }
-          }
-        });
-        room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
-          const mediaTrack = track.mediaStreamTrack;
-          if (mediaTrack) {
-            combinedStream.removeTrack(mediaTrack);
-          }
-        });
-
-        // Prepare then start
-        await room.prepareConnection(created.url, created.access_token);
-        await startStreamingSession(token, created.session_id);
-        await room.connect(created.url, created.access_token);
-
-        setIsAvatarRunning(true);
-        setStartAvatarLoading(false);
-
-        // Send greeting IMMEDIATELY to override any default opening text
-        // First interrupt any default speech, then send our greeting
-        setTimeout(async () => {
-          setHasGreeted(prev => {
-            if (!prev) {
-              const greeting = "Hello I am 6, your personal assistant. How can I help you today?";
-              greetingRef.current = greeting;
-              greetingRetryCountRef.current = 0;
-              
-              // Interrupt any default opening text first, then send our greeting
-              // Use 'chat' task with minimal text to interrupt - API doesn't support 'interrupt' type
-              sendStreamingTask(token, created.session_id, '.', 'repeat')
-                .then(() => {
-                  // After interrupt, immediately send our greeting
-                  setTimeout(() => {
-                    setAvatarSpeech(greeting);
-                  }, 100);
-                })
-                .catch(err => {
-                  console.error('Failed to interrupt default speech:', err);
-                  // Still send greeting even if interrupt fails
-                  setAvatarSpeech(greeting);
-                });
-              
-              return true;
-            }
-            return prev;
-          });
-        }, 300); // Small delay to ensure session is ready, but fast enough to override default
-
-      } catch (error: unknown) {
+      } catch (error: any) {
         console.error("Error initializing avatar:", error);
-        setStartAvatarLoading(false);
-        const errMsg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message || (error as Error).message;
         toast({
           variant: "destructive",
           title: "Uh oh! Something went wrong.",
-          description: errMsg,
-        });
+          description: error.response.data.message || error.message,
+        })
       }
     }
 
     initializeAndStartAvatar();
 
     return () => {
+      // Cleanup event handler and timeout
+      if (avatar.current) {
+        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
+      }
       clearTimeout(timeout);
-      try {
-        livekitRoomRef.current?.disconnect();
-      } catch (e) { console.debug('cleanup error', e); }
-    };
+    }
 
   }, []);
 
-  // SDK-specific handlers removed; LiveKit/REST flow handles media and speaking
-  // stopAvatarSpeech function is defined earlier in the file (around line 230)
+  // Avatar stop talking event handler
+  const handleAvatarStopTalking = (e: any) => {
+    console.log("Avatar stopped talking", e);
+    isAvatarSpeakingRef.current = false;
+    // Resume recognition after a short delay to avoid capturing tail of TTS
+    setTimeout(() => {
+      if (!isAiProcessing) {
+        speechService.current?.resume();
+      }
+    }, 600);
+  };
+
+
+  // Function to start the avatar (extracted from grab function)
+  async function startAvatar() {
+    setStartAvatarLoading(true);
+    setIsAvatarFullScreen(true);
+
+    // Check if required environment variables are present
+    const avatarId = import.meta.env.VITE_HEYGEN_AVATARID;
+    const voiceId = import.meta.env.VITE_HEYGEN_VOICEID;
+
+    if (!avatarId || !voiceId) {
+      setStartAvatarLoading(false);
+      toast({
+        variant: "destructive",
+        title: "Missing Configuration",
+        description: 'Missing HeyGen environment variables. Please check VITE_HEYGEN_AVATARID and VITE_HEYGEN_VOICEID in your .env file.',
+      });
+      return;
+    }
+
+    try {
+      // Add error handling for the streaming API
+      const res = await avatar.current!.createStartAvatar(
+        {
+          newSessionRequest: {
+            quality: "high",
+            avatarName: avatarId,
+            voice: { voiceId: voiceId }
+          }
+        },
+      );
+      console.log('Avatar session created:', res);
+      // Extract and store sessionId defensively from various possible shapes
+      const newSessionId = (res as any)?.sessionId || (res as any)?.data?.sessionId || (res as any)?.session_id || null;
+      if (newSessionId) {
+        setSessionId(newSessionId);
+      } else {
+        console.warn('No sessionId found in start response:', res);
+      }
+
+      // Set up the media stream with proper error handling
+      if (avatar.current?.mediaStream) {
+        setData(res);
+        setStream(avatar.current.mediaStream);
+        setStartAvatarLoading(false);
+        setIsAvatarRunning(true);
+        // Greet the user after stream and session are ready
+        setTimeout(() => {
+          if (sessionId || newSessionId) {
+            setAvatarSpeech('Hello, I am 6, your personal assistant. How can I help you today?');
+          }
+        }, 1500);
+        console.log('Avatar started successfully');
+
+        // Try to play immediately after a micro delay to ensure DOM is updated
+        setTimeout(() => {
+          playVideo();
+        }, 10);
+      } else {
+        throw new Error('Media stream not available');
+      }
+
+    } catch (error: any) {
+      console.error('Error starting avatar:', error);
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        avatarId: avatarId,
+        voiceId: voiceId
+      });
+      setStartAvatarLoading(false);
+
+      let errorMessage = 'Failed to start avatar. Please check your HeyGen configuration.';
+      if (error.response?.status === 400) {
+        errorMessage = 'Invalid avatar or voice configuration. Please check your HeyGen avatar and voice IDs.';
+      } else if (error.response?.status === 401) {
+        errorMessage = 'Invalid HeyGen API key. Please check your authentication.';
+      } else if (error.response?.status === 404) {
+        errorMessage = 'Avatar or voice not found. Please check your HeyGen configuration.';
+      } else if (error.message?.includes('debugStream')) {
+        errorMessage = 'Streaming connection error. Please try refreshing the page.';
+      }
+
+      toast({
+        variant: "destructive",
+        title: "Error starting avatar",
+        description: errorMessage,
+      })
+    }
+  }
+
+
+
+  // Function to stop the avatar's speech
+  const stopAvatarSpeech = async () => {
+    try {
+      if (avatar.current && data?.sessionId) {
+        // Use the interrupt method to stop current speech without ending the session
+        await avatar.current.interrupt({
+          interruptRequest: {
+            sessionId: data.sessionId
+          }
+        });
+
+        // Clear the speech text
+        setAvatarSpeech('');
+
+        toast({
+          title: "Speech Stopped",
+          description: "Avatar has stopped talking",
+        });
+      } else {
+        // If no active session, just clear the speech text
+        setAvatarSpeech('');
+        toast({
+          title: "Speech Stopped",
+          description: "Avatar has stopped talking",
+        });
+      }
+    } catch (error) {
+      console.error('Error stopping avatar speech:', error);
+      // Even if API call fails, clear the speech text
+      setAvatarSpeech('');
+      toast({
+        title: "Speech Stopped",
+        description: "Avatar has stopped talking",
+      });
+    }
+  };
+
+  // (barge-in handled inline in speech start callback)
 
 
 
@@ -1120,14 +1108,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         await mediaStream.current.play();
         console.log('Video started playing successfully');
         setVideoNeedsInteraction(false);
-      } catch (error: unknown) {
+      } catch (error: any) {
         console.error('Error playing video:', error);
-        type NamedError = { name?: string };
-        const e = error as NamedError;
-        if (e?.name === 'NotAllowedError') {
+        if (error.name === 'NotAllowedError') {
           console.log('Autoplay blocked, video will play when user interacts with the page');
           setVideoNeedsInteraction(true);
-        } else if (e?.name === 'AbortError') {
+        } else if (error.name === 'AbortError') {
           console.log('Video play was aborted, this is usually normal');
         } else {
           // For other errors, try again after a short delay
@@ -1204,37 +1190,34 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           <div className="relative w-full h-full">
             <Video
               ref={mediaStream}
-              className={`opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''}`}
+              className={
+                `opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''} ` +
+                (isVisionMode
+                  ? 'fixed top-4 left-4 w-24 h-32 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
+                  : '')
+              }
               onClick={() => handleVideoClick()}
             />
 
             {/* Click to play overlay when video needs interaction */}
-            {/* {videoNeedsInteraction && (
-              <div
-                className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm cursor-pointer z-10"
-                onClick={handleVideoClick}
-              >
-                <div className="text-center p-6 bg-white/95 rounded-2xl shadow-2xl border border-white/20 max-w-sm mx-4">
-                  <div className="w-16 h-16 bg-gradient-to-br from-blue-400 to-purple-500 rounded-full flex items-center justify-center mb-4 mx-auto">
-                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                  <h3 className="text-lg font-semibold text-gray-800 mb-2">Click to Start Avatar</h3>
-                  <p className="text-gray-600 text-sm">Click anywhere to begin your conversation</p>
-                </div>
-              </div>
-            )} */}
-            {/* Control buttons - Paper clip and Camera buttons */}
+
+            {/* Start Chat indicator removed per requirements */}
+
+
+            {/* Control buttons - visible after session starts (avatar running) */}
             {(isAvatarFullScreen && isAvatarRunning) && (
               <>
                 {/* Paper clip and Camera buttons - slightly above hands */}
                 <div className="absolute inset-x-0 top-1/2 translate-y-8 flex justify-center gap-4 z-20">
-                {/* Camera Button */}
+                  
+
+                  {/* Camera Button */}
                   <button
                     onClick={async () => {
                       try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                          video: { facingMode: { ideal: 'environment' } }
+                        });
                         setVisionCameraStream(stream);
                         setIsVisionMode(true);
                       } catch (error) {
@@ -1247,41 +1230,28 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       }
                     }}
                     disabled={isAiProcessing}
-                    className={`h-12 w-20 ${'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80 shadow-lg items-center justify-center'
-                      }`}
-                    style={{
-                      borderRadius: '50px',
-                      border: '4px solid #8B4513',
-                      borderTop: '4px solid #8B4513',
-                      borderBottom: '4px solid #8B4513',
-                      position: 'relative',
-                      overflow: 'hidden'
-                    }}
+                    className="p-3 bg-amber-500 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
                   >
-                    <Camera className="h-8 w-8 m-auto" />
+                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
                   </button>
+
                   {/* Paper Clip Button */}
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isAiProcessing}
-                    className={`h-12 w-20 ${'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80 shadow-lg items-center justify-center'
-                      }`}
-                    style={{
-                      borderRadius: '50px',
-                      border: '4px solid #8B4513',
-                      borderTop: '4px solid #8B4513',
-                      borderBottom: '4px solid #8B4513',
-                      position: 'relative',
-                      overflow: 'hidden'
-                    }}
+                    className="p-3 bg-amber-500 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
                   >
-                    <Paperclip className="h-8 w-8 m-auto" />
+                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                    </svg>
                   </button>
                 </div>
-
-                {/* Hidden file input for paper clip button */}
+                                    {/* Hidden file input for paper clip button */}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -1303,19 +1273,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             <div className="flex gap-2 sm:gap-3">
               <button
                 onClick={stopAvatarSpeech}
-                disabled={isStopping}
-                className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20 disabled:opacity-70 disabled:cursor-not-allowed"
+                className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20"
               >
-                {isStopping ? (
-                  <Loader2 className="w-3 h-3 sm:w-4 sm:h-4 animate-spin" />
-                ) : (
-                  <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10h6v4H9z" />
-                  </svg>
-                )}
-                <span className="hidden sm:inline">{isStopping ? 'Stopping...' : 'Stop Talking'}</span>
-                <span className="sm:hidden">{isStopping ? '...' : 'Stop'}</span>
+                <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10h6v4H9z" />
+                </svg>
+                <span className="hidden sm:inline">Stop Talking</span>
+                <span className="sm:hidden">Stop</span>
               </button>
             </div>
           </div>
@@ -1332,9 +1297,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         )}
 
 
-        {/* Vision Mode Camera - Right corner when in vision mode */}
+        {/* Vision Mode Camera - Fullscreen when in vision mode */}
         {isVisionMode && (
-          <div className="fixed top-20 right-4 w-32 h-40 z-40 rounded-lg overflow-hidden shadow-2xl border-2 border-purple-500">
+          <div className="fixed inset-0 z-40 bg-black">
             <video
               ref={visionVideoRef}
               autoPlay
@@ -1343,13 +1308,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               muted
               controls={false}
             />
-            <div className="absolute top-2 right-2">
+            <div className="absolute top-4 right-4">
               <button
                 onClick={exitVisionMode}
-                className="bg-red-500 hover:bg-red-600 text-white p-2 rounded-full shadow-lg transition-all duration-200"
+                className="bg-red-500 hover:bg-red-600 text-white p-3 rounded-full shadow-lg transition-all duration-200"
                 title="Exit Vision Mode"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
