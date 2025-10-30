@@ -1,5 +1,5 @@
 import { useToast } from "@/hooks/use-toast";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import OpenAI from 'openai';
 import { Room, RoomEvent, VideoPresets, RemoteTrack } from 'livekit-client';
 import { getAccessToken, createStreamingSession, startStreamingSession, sendStreamingTask, HeyGenSessionInfo } from './services/api';
@@ -40,6 +40,9 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const greetingRef = useRef<string | null>(null);
   const greetingRetryCountRef = useRef<number>(0);
+  const isStoppingRef = useRef<boolean>(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const shouldStopOnUserSpeechRef = useRef<boolean>(false);
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
@@ -94,6 +97,7 @@ function App() {
   const [startAvatarLoading, setStartAvatarLoading] = useState<boolean>(false);
   const [isAvatarRunning, setIsAvatarRunning] = useState<boolean>(false);
   const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
+  const [isStopping, setIsStopping] = useState<boolean>(false);
   let timeout: number | undefined;
 
 
@@ -217,6 +221,134 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     });
     setIsListening(false);
   };
+
+  // Store stopAvatarSpeech reference so it can be accessed by the callback
+  const stopAvatarSpeechRef = useRef<(() => Promise<void>) | null>(null);
+  
+  // Function to stop the avatar's speech (via REST task)
+  // Use 'chat' task type which may interrupt better than 'repeat'
+  const stopAvatarSpeech = useCallback(async () => {
+    try {
+      if (sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
+        // Set flags immediately to prevent new speech tasks and show loading state
+        isStoppingRef.current = true;
+        setIsStopping(true);
+        
+        // Cancel any pending API requests
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        
+        // Clear avatar speech immediately to prevent useEffect from sending new tasks
+        setAvatarSpeech('');
+        
+        // Temporarily mute/pause audio to stop buffered speech immediately
+        // This provides instant client-side feedback while server interrupts process
+        let wasMuted = false;
+        let wasPaused = false;
+        if (mediaStream.current) {
+          wasMuted = mediaStream.current.muted;
+          wasPaused = mediaStream.current.paused;
+          // Mute immediately for instant feedback
+          mediaStream.current.muted = true;
+          // Brief pause to stop buffered audio
+          if (!wasPaused) {
+            mediaStream.current.pause();
+          }
+        }
+        
+        // Send multiple rapid interrupt tasks using 'chat' type
+        // 'chat' type typically interrupts active speech better than 'repeat'
+        const interruptPromises = [];
+        try {
+          // Send interrupts simultaneously (fire and forget pattern for speed)
+          for (let i = 0; i < 5; i++) {
+            const interruptController = new AbortController();
+            interruptPromises.push(
+              sendStreamingTask(sessionToken, sessionInfo.session_id, '.', 'chat', interruptController.signal)
+                .catch(e => {
+                  if (e?.name !== 'AbortError' && e?.code !== 'ERR_CANCELED') {
+                    console.error(`Interrupt task ${i + 1} error:`, e);
+                  }
+                })
+            );
+          }
+          
+          // Wait for interrupts to be sent (don't wait for all to complete)
+          await Promise.allSettled(interruptPromises.slice(0, 2)); // Wait for at least 2
+          
+        } catch (e: any) {
+          // Ignore abort errors (they're expected)
+          if (e?.name !== 'AbortError' && e?.code !== 'ERR_CANCELED') {
+            console.error('Error sending interrupt tasks:', e);
+          }
+        }
+        
+        // Restore audio after brief moment (allows server interrupts to take effect)
+        if (mediaStream.current) {
+          setTimeout(() => {
+            if (mediaStream.current) {
+              mediaStream.current.muted = wasMuted;
+              if (!wasPaused && !isStoppingRef.current) {
+                mediaStream.current.play().catch(console.error);
+              }
+            }
+          }, 300); // Brief delay to let server process interrupts
+        }
+        
+        // Reset flags after a delay to allow for cleanup
+        setTimeout(() => {
+          isStoppingRef.current = false;
+          setIsStopping(false);
+        }, 300);
+        
+        toast({
+          title: "Speech Stopped",
+          description: "Avatar has stopped talking",
+        });
+      }
+    } catch (error) {
+      console.error('Error stopping avatar speech:', error);
+      isStoppingRef.current = false;
+      setIsStopping(false);
+      // Restore audio on error
+      if (mediaStream.current) {
+        mediaStream.current.muted = false;
+        mediaStream.current.play().catch(console.error);
+      }
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to stop avatar speech",
+      });
+    }
+  }, [sessionInfo?.session_id, sessionToken]);
+
+  // Update ref when stopAvatarSpeech changes
+  useEffect(() => {
+    stopAvatarSpeechRef.current = stopAvatarSpeech;
+  }, [stopAvatarSpeech]);
+
+  // Function to handle interim speech results (when user starts speaking)
+  // This will be called when speech recognition detects interim (partial) results
+  const handleInterimSpeech = useCallback((hasSpeech: boolean) => {
+    // When user starts speaking (hasSpeech = true) and avatar is currently talking, stop avatar
+    // We check avatarSpeech through a ref to get latest value without re-creating callback
+    const currentAvatarSpeech = avatarSpeech;
+    if (hasSpeech && currentAvatarSpeech && currentAvatarSpeech.trim().length > 0 && !isStoppingRef.current) {
+      console.log('User started speaking while avatar is talking - stopping avatar');
+      // Use the ref to track so we don't call multiple times rapidly
+      if (!shouldStopOnUserSpeechRef.current && stopAvatarSpeechRef.current) {
+        shouldStopOnUserSpeechRef.current = true;
+        stopAvatarSpeechRef.current();
+        // Reset flag after a brief moment
+        setTimeout(() => {
+          shouldStopOnUserSpeechRef.current = false;
+        }, 500);
+      }
+    }
+  }, [avatarSpeech]);
 
   // Function to handle file uploads
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -570,7 +702,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   useEffect(() => {
     speechService.current = new SpeechRecognitionService(
       handleSpeechResult,
-      handleSpeechError
+      handleSpeechError,
+      handleInterimSpeech
     );
 
     return () => {
@@ -578,7 +711,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         speechService.current.stopListening();
       }
     };
-  }, []);
+  }, [handleInterimSpeech]); // Re-initialize when handleInterimSpeech changes (when avatarSpeech changes)
 
   // Auto-start continuous listening when avatar is running
   useEffect(() => {
@@ -605,21 +738,54 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
   // When avatarSpeech updates, send a talk task via HeyGen API
   useEffect(() => {
+    // Early exit if speech is empty or stopping
+    if (!avatarSpeech || avatarSpeech.trim().length === 0 || isStoppingRef.current) {
+      // Cancel any pending request when clearing speech
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      return;
+    }
+    
     async function speak() {
-      if (avatarSpeech && sessionInfo?.session_id && sessionToken) {
+      // Double-check conditions after async gap
+      if (!avatarSpeech || avatarSpeech.trim().length === 0 || isStoppingRef.current) {
+        return;
+      }
+      
+      // Cancel any pending request first
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      
+      // Create new AbortController for this request
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+      
+      if (avatarSpeech && sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
         try {
-          await sendStreamingTask(sessionToken, sessionInfo.session_id, avatarSpeech, 'repeat');
+          await sendStreamingTask(sessionToken, sessionInfo.session_id, avatarSpeech, 'repeat', abortController.signal);
+          // Check again after request completes
+          if (isStoppingRef.current || !avatarSpeech) {
+            return;
+          }
           if (greetingRef.current === avatarSpeech) {
             greetingRef.current = null;
             greetingRetryCountRef.current = 0;
           }
         } catch (err: unknown) {
+          // Ignore abort errors (they're expected when stopping)
+          if ((err as any)?.name === 'AbortError' || (err as any)?.code === 'ERR_CANCELED') {
+            console.log('Speech task aborted');
+            return;
+          }
           console.error('Error sending talk task:', err);
-          if (greetingRef.current === avatarSpeech && greetingRetryCountRef.current < 3) {
+          if (greetingRef.current === avatarSpeech && greetingRetryCountRef.current < 3 && !isStoppingRef.current) {
             greetingRetryCountRef.current += 1;
             console.log(`Retrying greeting (attempt ${greetingRetryCountRef.current}/3)...`);
             setTimeout(() => {
-              if (greetingRef.current && sessionInfo?.session_id && sessionToken) {
+              if (greetingRef.current && sessionInfo?.session_id && sessionToken && !isStoppingRef.current) {
                 setAvatarSpeech(greetingRef.current);
               }
             }, 2000);
@@ -633,6 +799,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     }
 
     speak();
+    
+    // Cleanup: abort on unmount or when dependencies change
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
   }, [avatarSpeech, sessionInfo?.session_id, sessionToken]);
 
   // Bind the vision camera stream to the small overlay video when present
@@ -869,7 +1043,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               greetingRetryCountRef.current = 0;
               
               // Interrupt any default opening text first, then send our greeting
-              sendStreamingTask(token, created.session_id, '', 'interrupt')
+              // Use 'chat' task with minimal text to interrupt - API doesn't support 'interrupt' type
+              sendStreamingTask(token, created.session_id, '.', 'repeat')
                 .then(() => {
                   // After interrupt, immediately send our greeting
                   setTimeout(() => {
@@ -912,25 +1087,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, []);
 
   // SDK-specific handlers removed; LiveKit/REST flow handles media and speaking
-
-
-
-  // Function to stop the avatar's speech (via REST interrupt task)
-  const stopAvatarSpeech = async () => {
-    try {
-      if (sessionInfo?.session_id && sessionToken) {
-        await sendStreamingTask(sessionToken, sessionInfo.session_id, '', 'interrupt');
-      }
-    } catch (error) {
-      console.error('Error sending interrupt task:', error);
-    } finally {
-      setAvatarSpeech('');
-      toast({
-        title: "Speech Stopped",
-        description: "Avatar has stopped talking",
-      });
-    }
-  };
+  // stopAvatarSpeech function is defined earlier in the file (around line 230)
 
 
 
@@ -1146,14 +1303,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             <div className="flex gap-2 sm:gap-3">
               <button
                 onClick={stopAvatarSpeech}
-                className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20"
+                disabled={isStopping}
+                className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20 disabled:opacity-70 disabled:cursor-not-allowed"
               >
-                <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10h6v4H9z" />
-                </svg>
-                <span className="hidden sm:inline">Stop Talking</span>
-                <span className="sm:hidden">Stop</span>
+                {isStopping ? (
+                  <Loader2 className="w-3 h-3 sm:w-4 sm:h-4 animate-spin" />
+                ) : (
+                  <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10h6v4H9z" />
+                  </svg>
+                )}
+                <span className="hidden sm:inline">{isStopping ? 'Stopping...' : 'Stop Talking'}</span>
+                <span className="sm:hidden">{isStopping ? '...' : 'Stop'}</span>
               </button>
             </div>
           </div>

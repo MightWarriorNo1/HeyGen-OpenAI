@@ -4,12 +4,18 @@ export class SpeechRecognitionService {
   private isListening: boolean = false;
   private onResult: (text: string) => void;
   private onError: (error: string) => void;
+  private onInterimResult?: (hasSpeech: boolean) => void; // Callback for when user starts/stops speaking
   private accumulatedText: string = '';
   private speechTimeout: any = null;
 
-  constructor(onResult: (text: string) => void, onError: (error: string) => void) {
+  constructor(
+    onResult: (text: string) => void, 
+    onError: (error: string) => void,
+    onInterimResult?: (hasSpeech: boolean) => void
+  ) {
     this.onResult = onResult;
     this.onError = onError;
+    this.onInterimResult = onInterimResult;
     this.initializeRecognition();
   }
 
@@ -50,6 +56,12 @@ export class SpeechRecognitionService {
         }
       }
       
+      // Notify when user is speaking (interim results detected)
+      if (this.onInterimResult) {
+        const hasInterimSpeech = interimTranscript.trim().length > 0;
+        this.onInterimResult(hasInterimSpeech);
+      }
+      
       // Update accumulated text with final results
       if (finalTranscript.trim().length > 0) {
         this.accumulatedText += finalTranscript;
@@ -76,6 +88,10 @@ export class SpeechRecognitionService {
             console.log('Speech timeout reached, processing accumulated text:', this.accumulatedText);
             this.onResult(this.accumulatedText.trim());
             this.accumulatedText = '';
+          }
+          // Notify that user stopped speaking
+          if (this.onInterimResult) {
+            this.onInterimResult(false);
           }
         }, 2000); // 2 seconds of silence before processing
       }

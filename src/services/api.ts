@@ -72,17 +72,30 @@ export const sendStreamingTask = async (
     sessionToken: string,
     sessionId: string,
     text: string,
-    taskType: 'chat' | 'repeat' | 'interrupt' = 'chat'
+    taskType: 'chat' | 'repeat' = 'chat',
+    abortSignal?: AbortSignal
 ): Promise<void> => {
+    // Allow single space for interrupt purposes
+    const finalText = text.trim();
+    
+    // For interrupt tasks, a single space is acceptable
+    if (finalText.length === 0 && text !== ' ') {
+        throw new Error('Text cannot be empty for streaming task');
+    }
+    
+    // Use space if empty, otherwise use trimmed text
+    const textToSend = finalText.length > 0 ? finalText : ' ';
+    
     await axios.post(`${HEYGEN_BASE}/streaming.task`, {
         session_id: sessionId,
-        text,
+        text: textToSend,
         task_type: taskType,
     }, {
         headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${sessionToken}`,
         },
+        signal: abortSignal,
     });
 };
 
