@@ -51,6 +51,9 @@ function App() {
   const [latestMediaKey, setLatestMediaKey] = useState<string | null>(null);
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
   const isAvatarSpeakingRef = useRef<boolean>(false);
+  const shouldCancelSpeechRef = useRef<boolean>(false);
+  const sessionIdRef = useRef<string | null>(null); // Ref to always have current sessionId
+  const isInitialGreetingRef = useRef<boolean>(false); // Flag to protect initial greeting from interruption
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
@@ -140,9 +143,42 @@ function App() {
   // Function to handle speech recognition results
   const handleSpeechResult = async (transcript: string) => {
     console.log('Speech result received:', transcript);
+    
+    // CRITICAL: If avatar is still speaking, interrupt it first before processing
+    if (isAvatarSpeakingRef.current) {
+      console.log('⚠️ Avatar still speaking when user speech received - forcing interrupt...');
+      try {
+        // Use sessionId from ref (always current), fallback to state, then data
+        const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+        if (avatar.current && currentSessionId) {
+          console.log('📞 Force interrupting avatar with sessionId:', currentSessionId);
+          await avatar.current.interrupt({
+            interruptRequest: {
+              sessionId: currentSessionId
+            }
+          });
+          console.log('✅ Avatar force interrupted successfully');
+        } else {
+          console.warn('⚠️ Cannot force interrupt - missing sessionId', {
+            hasAvatar: !!avatar.current,
+            sessionIdFromRef: sessionIdRef.current,
+            sessionIdFromState: sessionId,
+            sessionIdFromData: data?.sessionId
+          });
+        }
+      } catch (err) {
+        console.error('Interrupt failed:', err);
+      } finally {
+        setAvatarSpeech('');
+        isAvatarSpeakingRef.current = false;
+      }
+    }
+    
     try {
-      // Mark that user has started chatting
+      // Mark that user has started chatting - this means initial greeting is done
       setHasUserStartedChatting(true);
+      // Clear initial greeting flag since user has started interacting
+      isInitialGreetingRef.current = false;
 
       // Add user message to chat
       const updatedMessages = [...chatMessages, { role: 'user', message: transcript }];
@@ -219,7 +255,7 @@ function App() {
         messages: [
           {
             role: 'system',
-            content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -264,8 +300,29 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       const aiMessage = aiResponse.choices[0].message.content || '';
       // Add AI response to chat
       setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-      // Set avatar speech to AI message so avatar can speak it
-      setAvatarSpeech(aiMessage);
+      
+      // CRITICAL: After processing user speech and getting AI response, always set avatar speech
+      // The speak useEffect will handle ensuring the avatar is ready to speak
+      // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
+      if (!isAvatarSpeakingRef.current) {
+        // Avatar is not speaking - safe to start speaking the response immediately
+        setAvatarSpeech(aiMessage);
+      } else {
+        // Avatar might still be in the process of stopping after interruption
+        // Wait briefly for the interrupt to complete, then set speech
+        console.log('⚠️ Avatar might still be stopping, waiting briefly before speaking response...');
+        setTimeout(() => {
+          // Double-check and set speech - the speak useEffect will handle the rest
+          if (!isAvatarSpeakingRef.current) {
+            setAvatarSpeech(aiMessage);
+          } else {
+            // Force clear and set speech - user has spoken, avatar must respond
+            console.log('⚠️ Force clearing avatar speaking flag to allow response');
+            isAvatarSpeakingRef.current = false;
+            setAvatarSpeech(aiMessage);
+          }
+        }, 300);
+      }
 
       // Clear loading state
       setIsAiProcessing(false);
@@ -342,8 +399,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Inform user that analysis is underway
       const analyzingText = newFiles.length === 1
-        ? `I'm analyzing "${newFiles[0].name}" now. Please wait until analysis is completed...`
-        : `I'm analyzing your files now. Please wait until analysis is completed...`;
+        ? `I'm analyzing "${newFiles[0].name}" now. Please wait until Analysis is finished  ...`
+        : `I'm analyzing your files now. Please wait until Analysis is finished...`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
       setAvatarSpeech(analyzingText);
     }
@@ -658,9 +715,31 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       }));
 
       // Notify user that analysis is complete for this item
-      const doneText = `I've analyzed "${file.name}". What can I help you with about it?`;
+      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}" and I've got all the details locked and loaded. The analysis is finished, and I'm ready to help you with whatever you need! What questions do you have about it?`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: doneText }]);
-      setAvatarSpeech(doneText);
+      
+      // Wait a bit for any previous speech to finish, then set the completion message
+      // This ensures the avatar will speak the completion message even if it's currently speaking
+      setTimeout(() => {
+        // Check if avatar is still speaking; if so, interrupt to speak the completion message
+        if (isAvatarSpeakingRef.current && avatar.current) {
+          const currentSessionId = sessionIdRef.current || sessionId;
+          if (currentSessionId) {
+            console.log('Interrupting current speech to deliver completion message');
+            // Reset speaking state immediately so new speech isn't blocked
+            isAvatarSpeakingRef.current = false;
+            // Interrupt current speech to make room for completion message
+            avatar.current.interrupt({
+              interruptRequest: { sessionId: currentSessionId }
+            }).catch(err => console.error('Interrupt error:', err));
+          }
+        }
+        // Set the completion message after a short delay to ensure interrupt completes
+        setTimeout(() => {
+          console.log('Setting completion message:', doneText.substring(0, 50));
+          setAvatarSpeech(doneText);
+        }, 400);
+      }, 500);
     } catch (error: any) {
       console.error('Error processing media with AI:', error);
       setMediaAnalyses(prev => ({
@@ -688,22 +767,49 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       handleSpeechResult,
       handleSpeechError,
       async () => {
-        // User started speaking; if avatar is currently talking, interrupt immediately
-        if (isAvatarSpeakingRef.current) {
+        // User started speaking; if avatar is currently talking, interrupt IMMEDIATELY
+        // EXCEPTION: Don't interrupt the initial greeting - let it complete
+        if (isAvatarSpeakingRef.current && !isInitialGreetingRef.current) {
+          console.log('🚨 User speech detected - interrupting avatar immediately...');
+          
+          // CRITICAL: Set cancellation flag FIRST to stop ongoing speak() function
+          shouldCancelSpeechRef.current = true;
+          
+          // CRITICAL: Clear avatar speech state (synchronously) to prevent new speech
+          setAvatarSpeech('');
+          isAvatarSpeakingRef.current = false;
+          
+          // CRITICAL: Actually CALL and AWAIT the interrupt - don't just fire and forget
           try {
-            if (avatar.current && data?.sessionId) {
-              await avatar.current.interrupt({
+            // Use sessionId from ref (always current), fallback to state, then data
+            const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+            
+            if (avatar.current && currentSessionId) {
+              console.log('📞 Calling interrupt API with sessionId:', currentSessionId);
+              const interruptResult = await avatar.current.interrupt({
                 interruptRequest: {
-                  sessionId: data.sessionId
+                  sessionId: currentSessionId
                 }
               });
+              console.log('✅ Avatar interrupted successfully via API. Result:', interruptResult);
+            } else {
+              console.warn('⚠️ Cannot interrupt - avatar or sessionId not available', {
+                hasAvatar: !!avatar.current,
+                sessionIdFromRef: sessionIdRef.current,
+                sessionIdFromState: sessionId,
+                sessionIdFromData: data?.sessionId,
+                currentSessionId
+              });
             }
-          } catch (err) {
-            console.error('Interrupt failed (barge-in):', err);
-          } finally {
-            setAvatarSpeech('');
-            isAvatarSpeakingRef.current = false;
+          } catch (err: any) {
+            console.error('❌ Interrupt API call failed:', err);
+            // Even if interrupt fails, we've cleared the state and set cancel flag
           }
+          
+          // Immediately force resume recognition so user's ongoing speech can be captured
+          speechService.current?.forceResume();
+        } else if (isInitialGreetingRef.current) {
+          console.log('🛡️ Ignoring interrupt attempt during initial greeting');
         }
       }
     );
@@ -716,18 +822,21 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   }, []);
 
   // Auto-start continuous listening when avatar is running
+  // BUT: Don't start until initial greeting is complete (to avoid interfering with greeting)
   useEffect(() => {
-    if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing) {
+    if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing && !isInitialGreetingRef.current) {
       console.log('Auto-starting continuous speech recognition...');
       handleStartListening();
     }
   }, [isAvatarRunning, isListening, isAiProcessing]);
 
   // Periodic check to ensure speech recognition stays active
+  // BUT: Don't start/restart during initial greeting
   useEffect(() => {
     if (isAvatarRunning && speechService.current) {
       const checkInterval = setInterval(() => {
-        if (speechService.current && !speechService.current.isActive() && !isAiProcessing) {
+        // Only restart if greeting is complete
+        if (speechService.current && !speechService.current.isActive() && !isAiProcessing && !isInitialGreetingRef.current) {
           console.log('Speech recognition not active, restarting...');
           speechService.current.forceRestart();
         }
@@ -741,20 +850,79 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
   useEffect(() => {
     async function speak() {
-      if (avatarSpeech && sessionId) {
+      // Use sessionId from ref (always current) or state, for greeting compatibility
+      const currentSessionId = sessionIdRef.current || sessionId;
+      if (avatarSpeech && currentSessionId) {
+        // CRITICAL: Reset cancellation flag at start of new speech
+        shouldCancelSpeechRef.current = false;
+        
+        // CRITICAL: Check if user is currently speaking (AI processing means user just spoke)
+        // Don't start speaking if user is in the middle of speaking
+        if (isAiProcessing) {
+          console.log('⚠️ Skipping avatar speech - user is speaking (AI processing)');
+          // Clear the avatarSpeech since we're not speaking it
+          setAvatarSpeech('');
+          return;
+        }
+        
+        // CRITICAL: Double-check avatar is not already speaking (race condition protection)
+        if (isAvatarSpeakingRef.current) {
+          console.log('⚠️ Skipping avatar speech - avatar already speaking');
+          setAvatarSpeech('');
+          return;
+        }
+        
         try {
           // Suspend speech recognition while avatar is speaking to avoid self-capture
           speechService.current?.suspend();
           isAvatarSpeakingRef.current = true;
-          await avatar.current?.speak({ taskRequest: { text: avatarSpeech, sessionId } });
+          console.log('🗣️ Avatar starting to speak:', avatarSpeech.substring(0, 50) + '...');
+          
+          // Store the current avatarSpeech value to check if it was cleared during speak
+          const speechToSpeak = avatarSpeech;
+          
+          // Call speak API
+          // Note: If interrupted, the server will stop but the promise may still resolve
+          // The handleAvatarStopTalking event will handle cleanup
+          const speakPromise = avatar.current?.speak({ taskRequest: { text: speechToSpeak, sessionId: currentSessionId } });
+          await speakPromise;
+          
+          // CRITICAL: After speak completes, check if it was cancelled/interrupted
+          // (The interrupt might have happened during speak, and handleAvatarStopTalking 
+          // would have already set isAvatarSpeakingRef.current = false)
+          if (shouldCancelSpeechRef.current || !isAvatarSpeakingRef.current) {
+            console.log('⚠️ Speech was cancelled/interrupted - speak() completed but was interrupted');
+            // Clear initial greeting flag if it was interrupted
+            if (isInitialGreetingRef.current) {
+              isInitialGreetingRef.current = false;
+            }
+            // Don't update state - handleAvatarStopTalking already did it
+            return;
+          }
+          
+          // If this was the initial greeting, clear the flag now that it's complete
+          if (isInitialGreetingRef.current) {
+            console.log('✅ Initial greeting completed successfully');
+            isInitialGreetingRef.current = false;
+          }
+          
+          console.log('✅ Avatar finished speaking naturally (not interrupted)');
         } catch (err: any) {
           console.error('Speak failed:', err);
+          // If speak fails, reset speaking state
+          isAvatarSpeakingRef.current = false;
+          speechService.current?.resume();
+        } finally {
+          // Only reset speaking state if we weren't cancelled
+          if (!shouldCancelSpeechRef.current && isAvatarSpeakingRef.current) {
+            // State will be set by handleAvatarStopTalking event
+          }
         }
       }
     }
 
     speak();
-  }, [avatarSpeech, sessionId]);
+  }, [avatarSpeech, sessionId, isAiProcessing]);
 
   // Bind the vision camera stream to the small overlay video when present
   useEffect(() => {
@@ -935,13 +1103,46 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Avatar stop talking event handler
   const handleAvatarStopTalking = (e: any) => {
     console.log("Avatar stopped talking", e);
+    
+    // Check if this stop was due to interruption
+    if (shouldCancelSpeechRef.current) {
+      console.log('🛑 Avatar stopped due to user interruption');
+      shouldCancelSpeechRef.current = false; // Reset flag
+      // If interrupted, clear initial greeting flag (user spoke, greeting is done)
+      if (isInitialGreetingRef.current) {
+        isInitialGreetingRef.current = false;
+      }
+      
+      // CRITICAL: If user interrupted and continued speaking, process their speech now
+      // This ensures accumulated text gets processed even if recognition is still active
+      setTimeout(() => {
+        if (speechService.current) {
+          speechService.current.processPendingSpeech();
+        }
+      }, 300); // Small delay to ensure interruption is complete
+    } else if (isInitialGreetingRef.current) {
+      // Greeting completed naturally
+      console.log('✅ Initial greeting completed naturally');
+      isInitialGreetingRef.current = false;
+      // Start speech recognition now that greeting is complete
+      setTimeout(() => {
+        if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing) {
+          console.log('Starting speech recognition after greeting completion...');
+          handleStartListening();
+        }
+      }, 500);
+    }
+    
     isAvatarSpeakingRef.current = false;
     // Resume recognition after a short delay to avoid capturing tail of TTS
-    setTimeout(() => {
-      if (!isAiProcessing) {
-        speechService.current?.resume();
-      }
-    }, 600);
+    // But only if greeting is complete
+    if (!isInitialGreetingRef.current) {
+      setTimeout(() => {
+        if (!isAiProcessing) {
+          speechService.current?.resume();
+        }
+      }, 600);
+    }
   };
 
 
@@ -980,6 +1181,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       const newSessionId = (res as any)?.sessionId || (res as any)?.data?.sessionId || (res as any)?.session_id || null;
       if (newSessionId) {
         setSessionId(newSessionId);
+        sessionIdRef.current = newSessionId; // Also update ref for callback access
+        console.log('✅ SessionId set:', newSessionId);
       } else {
         console.warn('No sessionId found in start response:', res);
       }
@@ -993,6 +1196,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         // Greet the user after stream and session are ready
         setTimeout(() => {
           if (sessionId || newSessionId) {
+            // Ensure speech recognition is stopped before greeting to avoid interference
+            if (speechService.current && speechService.current.isActive()) {
+              console.log('Stopping speech recognition before greeting...');
+              speechService.current.stopListening();
+            }
+            // Mark this as initial greeting to protect it from interruption
+            isInitialGreetingRef.current = true;
+            console.log('👋 Starting initial greeting...');
             setAvatarSpeech('Hello, I am 6, your personal assistant. How can I help you today?');
           }
         }, 1500);
@@ -1041,11 +1252,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to stop the avatar's speech
   const stopAvatarSpeech = async () => {
     try {
-      if (avatar.current && data?.sessionId) {
+      // Use sessionId from ref (always current), fallback to state, then data
+      const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+      if (avatar.current && currentSessionId) {
         // Use the interrupt method to stop current speech without ending the session
         await avatar.current.interrupt({
           interruptRequest: {
-            sessionId: data.sessionId
+            sessionId: currentSessionId
           }
         });
 
@@ -1215,9 +1428,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   <button
                     onClick={async () => {
                       try {
-                        const stream = await navigator.mediaDevices.getUserMedia({
-                          video: { facingMode: { ideal: 'environment' } }
-                        });
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                         setVisionCameraStream(stream);
                         setIsVisionMode(true);
                       } catch (error) {
@@ -1361,3 +1572,5 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 }
 
 export default App;
+
+
