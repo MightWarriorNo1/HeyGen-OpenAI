@@ -1435,7 +1435,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               className={
                 `opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''} ` +
                 (isVisionMode
-                  ? 'fixed top-4 left-4 w-24 h-32 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
+                  ? 'fixed top-2 left-2 sm:top-4 sm:left-4 w-20 h-28 sm:w-24 sm:h-32 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
                   : '')
               }
               onClick={() => handleVideoClick()}
