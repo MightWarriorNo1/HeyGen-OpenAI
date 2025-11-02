@@ -33,6 +33,7 @@ function App() {
   const mediaStream = useRef<HTMLVideoElement>(null);
   const visionVideoRef = useRef<HTMLVideoElement>(null);
   const [visionCameraStream, setVisionCameraStream] = useState<MediaStream | null>(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment'); // Default to rear-facing
   const visionMonitorIntervalRef = useRef<number | null>(null);
   const lastSampleImageDataRef = useRef<ImageData | null>(null);
   const stabilityStartRef = useRef<number | null>(null);
@@ -87,6 +88,34 @@ function App() {
     if (visionCameraStream) {
       visionCameraStream.getTracks().forEach(t => t.stop());
       setVisionCameraStream(null);
+    }
+    // Reset to default rear-facing camera when exiting
+    setCameraFacingMode('environment');
+  };
+
+  // Function to switch camera facing mode
+  const switchCamera = async () => {
+    const newFacingMode = cameraFacingMode === 'environment' ? 'user' : 'environment';
+    
+    // Stop current stream
+    if (visionCameraStream) {
+      visionCameraStream.getTracks().forEach(t => t.stop());
+    }
+
+    try {
+      // Get new stream with the opposite facing mode
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacingMode }
+      });
+      setVisionCameraStream(stream);
+      setCameraFacingMode(newFacingMode);
+    } catch (error) {
+      console.error('Error switching camera:', error);
+      toast({
+        variant: "destructive",
+        title: "Camera Error",
+        description: "Could not switch camera. Please check permissions.",
+      });
     }
   };
 
@@ -399,7 +428,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Inform user that analysis is underway
       const analyzingText = newFiles.length === 1
-        ? `I'm analyzing "${newFiles[0].name}" now. Please wait until Analysis is finished  ...`
+        ? `I'm analyzing right now. Please wait until Analysis is finished  ...`
         : `I'm analyzing your files now. Please wait until Analysis is finished...`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
       setAvatarSpeech(analyzingText);
@@ -1428,16 +1457,31 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   <button
                     onClick={async () => {
                       try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        // Default to rear-facing camera (environment)
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                          video: { facingMode: 'environment' }
+                        });
                         setVisionCameraStream(stream);
+                        setCameraFacingMode('environment'); // Reset to rear-facing when opening
                         setIsVisionMode(true);
                       } catch (error) {
                         console.error('Error accessing camera:', error);
-                        toast({
-                          variant: "destructive",
-                          title: "Camera Error",
-                          description: "Could not access camera. Please check permissions.",
-                        });
+                        // Fallback to front-facing if rear-facing fails
+                        try {
+                          const stream = await navigator.mediaDevices.getUserMedia({
+                            video: { facingMode: 'user' }
+                          });
+                          setVisionCameraStream(stream);
+                          setCameraFacingMode('user');
+                          setIsVisionMode(true);
+                        } catch (fallbackError) {
+                          console.error('Error accessing camera (fallback):', fallbackError);
+                          toast({
+                            variant: "destructive",
+                            title: "Camera Error",
+                            description: "Could not access camera. Please check permissions.",
+                          });
+                        }
                       }
                     }}
                     disabled={isAiProcessing}
@@ -1519,7 +1563,18 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               muted
               controls={false}
             />
-            <div className="absolute top-4 right-4">
+            <div className="absolute top-4 right-4 flex gap-2">
+              {/* Camera Switch Button */}
+              <button
+                onClick={switchCamera}
+                className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-full shadow-lg transition-all duration-200"
+                title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+              </button>
+              {/* Exit Button */}
               <button
                 onClick={exitVisionMode}
                 className="bg-red-500 hover:bg-red-600 text-white p-3 rounded-full shadow-lg transition-all duration-200"
