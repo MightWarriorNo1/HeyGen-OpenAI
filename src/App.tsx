@@ -388,8 +388,25 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
       // Process each file and add to chat immediately
       newFiles.forEach(file => {
-        const fileType = file.type.startsWith('image/') ? 'photo' :
-          file.type.startsWith('video/') ? 'video' : null;
+        // Detect file type more accurately
+        // Check MIME type first, then fall back to extension
+        let fileType: 'photo' | 'video' | null = null;
+        if (file.type.startsWith('image/')) {
+          fileType = 'photo';
+        } else if (file.type.startsWith('video/')) {
+          fileType = 'video';
+        } else {
+          // Fallback: check file extension
+          const fileName = file.name.toLowerCase();
+          const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+          const videoExtensions = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
+          
+          if (imageExtensions.some(ext => fileName.endsWith(ext))) {
+            fileType = 'photo';
+          } else if (videoExtensions.some(ext => fileName.endsWith(ext))) {
+            fileType = 'video';
+          }
+        }
 
         if (fileType) {
           const mediaKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
@@ -1496,7 +1513,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
                   {/* Paper Clip Button */}
                   <button
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => {
+                      // On mobile, when user clicks this, they'll see native picker
+                      // with options: Photo Library, Take Photo or Video, Choose Files
+                      // For video recording to work properly, we need to ensure
+                      // the input can handle video recording when user selects video mode
+                      fileInputRef.current?.click();
+                    }}
                     disabled={isAiProcessing}
                     className="p-3 bg-amber-500 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
@@ -1506,11 +1529,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     </svg>
                   </button>
                 </div>
-                                    {/* Hidden file input for paper clip button */}
+                                    {/* Hidden file inputs for paper clip button */}
+                {/* General file input for photo library and file selection */}
+                {/* Note: On mobile, this shows native picker with options: Photo Library, Take Photo or Video, Choose Files */}
+                {/* Issue: When user selects "Take Photo or Video" → "Video", it might default to photo mode on some devices */}
+                {/* Fix: Remove 'multiple' for video recording compatibility and ensure proper video MIME type handling */}
                 <input
                   ref={fileInputRef}
                   type="file"
-                  multiple
                   accept="image/*,video/*"
                   onChange={handleFileUpload}
                   className="hidden"
