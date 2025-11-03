@@ -5,9 +5,10 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from 'lucide-react';
+import { Loader2, Settings } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
+import { DesignPanel } from './components/reusable/DesignPanel';
 
 interface ChatMessageType {
   role: string;
@@ -58,6 +59,30 @@ function App() {
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
+  const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
+  
+  // Design settings for mobile buttons
+  const [designSettings, setDesignSettings] = useState({
+    cameraButton: {
+      opacity: 1,
+      color: '#f59e0b', // amber-500
+      size: 48, // p-3 = 12px padding on each side, so ~48px total
+      position: {
+        top: 0, // translate-y-8 = 2rem from center
+        left: 0
+      }
+    },
+    paperClipButton: {
+      opacity: 1,
+      color: '#f59e0b', // amber-500
+      size: 48,
+      position: {
+        top: 0,
+        left: 0
+      }
+    },
+    buttonGap: 1 // gap-4 = 1rem
+  });
   const [chatMessages, setChatMessages] = useState<ChatMessageType[]>([
     // {
     //   role: 'user',
@@ -91,6 +116,131 @@ function App() {
     }
     // Reset to default rear-facing camera when exiting
     setCameraFacingMode('environment');
+  };
+
+  // Function to handle "What can you see right now?" button click
+  const handleWhatCanYouSee = async () => {
+    if (!visionVideoRef.current || isAiProcessing) {
+      return;
+    }
+
+    try {
+      setIsAiProcessing(true);
+      
+      // Capture current frame
+      const currentFrameDataUrl = captureVisionFrameDataUrl();
+      if (!currentFrameDataUrl) {
+        toast({
+          variant: "destructive",
+          title: "Camera Error",
+          description: "Could not capture camera frame. Please try again.",
+        });
+        setIsAiProcessing(false);
+        return;
+      }
+
+      // Build conversation history
+      const conversationHistory = chatMessages.map(msg => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
+      }));
+
+      // Prepare messages for vision analysis
+      const messagesForVision = [
+        {
+          role: 'system' as const,
+          content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+
+PERSONALITY TRAITS:
+- Crack jokes, puns, and witty observations constantly
+- Use self-deprecating humor and playful sarcasm
+- Make pop culture references and clever wordplay
+- Be genuinely helpful while being absolutely hilarious
+- React to images/videos with funny commentary
+- Remember EVERYTHING from the conversation (text, images, videos, vision data)
+- Build on previous jokes and references throughout the conversation
+
+VISION ANALYSIS:
+- When analyzing images/videos, make hilarious observations about what you see
+- Point out funny details, absurd situations, or comedic elements
+- Use your vision analysis to crack jokes while being genuinely helpful
+- Reference previous images/videos in the conversation for running gags
+- Answer questions based on what you can see in the current camera frame
+
+CONVERSATION MEMORY:
+- Remember all previous messages, images, videos, and vision analysis
+- Reference past conversation elements in your responses
+- Build running jokes and callbacks
+- Acknowledge when you're seeing something new vs. referencing something old
+
+RESPONSE STYLE:
+- Start responses with a funny observation or joke when appropriate
+- Use emojis sparingly but effectively for comedic timing
+- Vary your humor style (puns, observational comedy, absurdist humor)
+- Keep responses helpful but entertaining
+- If someone shares media, react with humor while being genuinely helpful
+- Answer questions based on what you see in the camera view
+
+Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
+        },
+        ...conversationHistory,
+        {
+          role: 'user' as const,
+          content: [
+            {
+              type: 'text' as const,
+              text: 'What can you see right now? Describe what you see in the current camera view.'
+            },
+            {
+              type: 'image_url' as const,
+              image_url: { url: currentFrameDataUrl, detail: 'high' as const }
+            }
+          ]
+        }
+      ];
+
+      // Get AI response
+      const aiResponse = await openai.chat.completions.create({
+        model: 'grok-2-vision',
+        messages: messagesForVision,
+        temperature: 0.8,
+        max_tokens: 400
+      } as any);
+
+      const aiMessage = aiResponse.choices[0].message.content || '';
+      
+      // Add AI response to chat
+      setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
+      
+      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+      speechService.current?.suspend();
+      
+      // Make avatar speak the analysis
+      if (!isAvatarSpeakingRef.current) {
+        setAvatarSpeech(aiMessage);
+      } else {
+        // Wait briefly for avatar to finish, then speak
+        setTimeout(() => {
+          if (!isAvatarSpeakingRef.current) {
+            setAvatarSpeech(aiMessage);
+          } else {
+            // Force clear and set speech
+            isAvatarSpeakingRef.current = false;
+            setAvatarSpeech(aiMessage);
+          }
+        }, 300);
+      }
+
+      setIsAiProcessing(false);
+    } catch (error: any) {
+      console.error('Error analyzing camera view:', error);
+      setIsAiProcessing(false);
+      toast({
+        variant: "destructive",
+        title: "Analysis Error",
+        description: error.message || 'Failed to analyze the camera view. Please try again.',
+      });
+    }
   };
 
   // Function to switch camera facing mode
@@ -216,6 +366,113 @@ function App() {
       // Set loading state
       setIsAiProcessing(true);
 
+      // Check if we're in camera/vision mode - if so, capture current frame and answer based on it
+      if (isVisionMode && visionVideoRef.current) {
+        console.log('📸 Camera mode active - capturing current frame for AI response');
+        const currentFrameDataUrl = captureVisionFrameDataUrl();
+        
+        if (currentFrameDataUrl) {
+          // Build conversation history for vision
+          const conversationHistory = updatedMessages.map(msg => ({
+            role: msg.role as 'user' | 'assistant',
+            content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
+          }));
+
+          const messagesForVision = [
+            {
+              role: 'system' as const,
+              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+
+PERSONALITY TRAITS:
+- Crack jokes, puns, and witty observations constantly
+- Use self-deprecating humor and playful sarcasm
+- Make pop culture references and clever wordplay
+- Be genuinely helpful while being absolutely hilarious
+- React to images/videos with funny commentary
+- Remember EVERYTHING from the conversation (text, images, videos, vision data)
+- Build on previous jokes and references throughout the conversation
+
+VISION ANALYSIS:
+- When analyzing images/videos, make hilarious observations about what you see
+- Point out funny details, absurd situations, or comedic elements
+- Use your vision analysis to crack jokes while being genuinely helpful
+- Reference previous images/videos in the conversation for running gags
+- Answer questions based on what you can see in the current camera frame
+
+CONVERSATION MEMORY:
+- Remember all previous messages, images, videos, and vision analysis
+- Reference past conversation elements in your responses
+- Build running jokes and callbacks
+- Acknowledge when you're seeing something new vs. referencing something old
+
+RESPONSE STYLE:
+- Start responses with a funny observation or joke when appropriate
+- Use emojis sparingly but effectively for comedic timing
+- Vary your humor style (puns, observational comedy, absurdist humor)
+- Keep responses helpful but entertaining
+- If someone shares media, react with humor while being genuinely helpful
+- Answer questions based on what you see in the camera view
+
+Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
+            },
+            ...conversationHistory.slice(0, -1), // All previous messages except the last (user's current question)
+            {
+              role: 'user' as const,
+              content: [
+                {
+                  type: 'text' as const,
+                  text: transcript
+                },
+                {
+                  type: 'image_url' as const,
+                  image_url: { url: currentFrameDataUrl, detail: 'high' as const }
+                }
+              ]
+            }
+          ];
+
+          const aiResponse = await openai.chat.completions.create({
+            model: 'grok-2-vision',
+            messages: messagesForVision,
+            temperature: 0.8,
+            max_tokens: 400
+          } as any);
+
+          const aiMessage = aiResponse.choices[0].message.content || '';
+          // Add AI response to chat
+          setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
+          
+          // CRITICAL: After processing user speech and getting AI response, always set avatar speech
+          // The speak useEffect will handle ensuring the avatar is ready to speak
+          // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
+          if (!isAvatarSpeakingRef.current) {
+            // Avatar is not speaking - safe to start speaking the response immediately
+            setAvatarSpeech(aiMessage);
+          } else {
+            // Avatar might still be in the process of stopping after interruption
+            // Wait briefly for the interrupt to complete, then set speech
+            console.log('⚠️ Avatar might still be stopping, waiting briefly before speaking response...');
+            setTimeout(() => {
+              // Double-check and set speech - the speak useEffect will handle the rest
+              if (!isAvatarSpeakingRef.current) {
+                setAvatarSpeech(aiMessage);
+              } else {
+                // Force clear and set speech - user has spoken, avatar must respond
+                console.log('⚠️ Force clearing avatar speaking flag to allow response');
+                isAvatarSpeakingRef.current = false;
+                setAvatarSpeech(aiMessage);
+              }
+            }, 300);
+          }
+
+          // Clear loading state
+          setIsAiProcessing(false);
+          return; // Exit early since we've handled vision mode
+        } else {
+          console.warn('⚠️ Could not capture camera frame, falling back to text-only mode');
+        }
+      }
+
       // Get AI response using xAI with full conversation context
       // Build optional media context if latest media analysis is ready
       const mediaContextMessage = (() => {
@@ -269,7 +526,7 @@ function App() {
           model: 'grok-2-latest',
           messages: messagesForAnswer,
           temperature: 0.8,
-          max_tokens: 100
+          max_tokens: 400
         });
 
         const aiMessage = aiResponse.choices[0].message.content || '';
@@ -323,7 +580,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           })
         ],
         temperature: 0.8,
-        max_tokens: 100
+        max_tokens: 400
       });
 
       const aiMessage = aiResponse.choices[0].message.content || '';
@@ -448,6 +705,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         ? `I'm analyzing right now. Please wait until Analysis is finished  ...`
         : `I'm analyzing your files now. Please wait until Analysis is finished...`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
+      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+      speechService.current?.suspend();
       setAvatarSpeech(analyzingText);
     }
   };
@@ -545,7 +804,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         model: 'grok-2-vision',
         messages: messages,
         temperature: 0.8,
-        max_tokens: 100
+        max_tokens: 400
       } as any);
 
       const aiMessage = aiResponse.choices[0].message.content || '';
@@ -648,7 +907,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
-            max_tokens: 100
+            max_tokens: 400
           } as any);
 
         } catch (visionError) {
@@ -697,7 +956,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               }
             ],
             temperature: 0.8,
-            max_tokens: 100
+            max_tokens: 400
           });
         }
       } else {
@@ -745,7 +1004,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ],
           temperature: 0.8,
-          max_tokens: 100
+          max_tokens: 400
         });
       }
       const aiMessage = aiResponse.choices[0].message.content || '';
@@ -783,6 +1042,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         // Set the completion message after a short delay to ensure interrupt completes
         setTimeout(() => {
           console.log('Setting completion message:', doneText.substring(0, 50));
+          // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+          speechService.current?.suspend();
           setAvatarSpeech(doneText);
         }, 400);
       }, 500);
@@ -1242,10 +1503,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         // Greet the user after stream and session are ready
         setTimeout(() => {
           if (sessionId || newSessionId) {
-            // Ensure speech recognition is stopped before greeting to avoid interference
-            if (speechService.current && speechService.current.isActive()) {
-              console.log('Stopping speech recognition before greeting...');
-              speechService.current.stopListening();
+            // CRITICAL: Suspend speech recognition before greeting to prevent it from capturing avatar's voice
+            if (speechService.current) {
+              console.log('Suspending speech recognition before greeting...');
+              speechService.current.suspend();
             }
             // Mark this as initial greeting to protect it from interruption
             isInitialGreetingRef.current = true;
@@ -1427,18 +1688,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         <div className="fixed top-0 left-0 right-0 w-full bg-white/10 backdrop-blur-sm border-b border-white/20 z-30">
           <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
             <div className="flex justify-between items-center">
-              <button
-                onClick={() => setShowAvatarTest(true)}
-                className="px-3 py-1 text-xs bg-white/20 text-white rounded-lg hover:bg-white/30 transition-colors"
-                title="Test Avatar Display"
-              >
-                Test Avatar
-              </button>
+              
               <div className="flex-1 text-center">
                 <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems – beta</h1>
                 <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
               </div>
-              <div className="w-16"></div> {/* Spacer for centering */}
+              <button
+                onClick={() => setShowDesignPanel(true)}
+                className="px-3 py-1 text-xs bg-white/20 text-white rounded-lg hover:bg-white/30 transition-colors flex items-center gap-1"
+                title="Design Panel"
+              >
+                <Settings className="w-3 h-3" />
+                <span className="hidden sm:inline">Design</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1466,10 +1728,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             {/* Control buttons - visible after session starts (avatar running) */}
             {(isAvatarFullScreen && isAvatarRunning) && (
               <>
-                {/* Paper clip and Camera buttons - slightly above hands */}
-                <div className="absolute inset-x-0 top-1/2 translate-y-8 flex justify-center gap-4 z-20">
-                  
-
+                {/* Paper clip and Camera buttons - adjustable design */}
+                <div 
+                  className="absolute inset-x-0 top-1/2 z-20 flex justify-center"
+                  style={{
+                    transform: `translateY(${2 + designSettings.cameraButton.position.top}rem)`,
+                    gap: `${designSettings.buttonGap}rem`
+                  }}
+                >
                   {/* Camera Button */}
                   <button
                     onClick={async () => {
@@ -1502,10 +1768,24 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       }
                     }}
                     disabled={isAiProcessing}
-                    className="p-3 bg-amber-500 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    className="rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    style={{
+                      opacity: designSettings.cameraButton.opacity,
+                      backgroundColor: designSettings.cameraButton.color,
+                      width: `${designSettings.cameraButton.size}px`,
+                      height: `${designSettings.cameraButton.size}px`,
+                      padding: `${(designSettings.cameraButton.size - 20) / 2}px`,
+                      transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`
+                    }}
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
                   >
-                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg 
+                      className="text-gray-700" 
+                      style={{ width: '20px', height: '20px' }}
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                     </svg>
@@ -1514,21 +1794,91 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Paper Clip Button */}
                   <button
                     onClick={() => {
-                      // On mobile, when user clicks this, they'll see native picker
-                      // with options: Photo Library, Take Photo or Video, Choose Files
-                      // For video recording to work properly, we need to ensure
-                      // the input can handle video recording when user selects video mode
-                      fileInputRef.current?.click();
+                      // On mobile, iOS may block video recording if there's an active camera stream
+                      // (thinking it's an active call). We need to stop any active camera streams
+                      // before opening the file picker to allow video recording.
+                      if (visionCameraStream) {
+                        // Temporarily stop vision camera stream to allow video recording
+                        visionCameraStream.getTracks().forEach(t => t.stop());
+                        setVisionCameraStream(null);
+                        // Exit vision mode if active
+                        setIsVisionMode(false);
+                      }
+                      // Small delay to ensure streams are fully stopped before opening picker
+                      setTimeout(() => {
+                        fileInputRef.current?.click();
+                      }, 100);
                     }}
                     disabled={isAiProcessing}
-                    className="p-3 bg-amber-500 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    className="rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    style={{
+                      opacity: designSettings.paperClipButton.opacity,
+                      backgroundColor: designSettings.paperClipButton.color,
+                      width: `${designSettings.paperClipButton.size}px`,
+                      height: `${designSettings.paperClipButton.size}px`,
+                      padding: `${(designSettings.paperClipButton.size - 20) / 2}px`,
+                      transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`
+                    }}
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
                   >
-                    <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg 
+                      className="text-gray-700" 
+                      style={{ width: '20px', height: '20px' }}
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                     </svg>
                   </button>
                 </div>
+
+                {/* Test Control Panel - appears when image is uploaded */}
+                {latestMediaKey && mediaAnalyses[latestMediaKey]?.status === 'ready' && (
+                  <div className="absolute inset-x-0 top-1/2 translate-y-24 flex justify-center z-20">
+                    <div className="bg-white/95 backdrop-blur-sm rounded-xl p-4 shadow-2xl border border-white/30 max-w-md w-full mx-4">
+                      <div className="text-center mb-3">
+                        <h3 className="text-sm font-semibold text-gray-800">Test Image Questions</h3>
+                        <p className="text-xs text-gray-600 mt-1">Quick test buttons for paper clip</p>
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          onClick={() => {
+                            if (!isAiProcessing) {
+                              handleSpeechResult('describe about the image');
+                            }
+                          }}
+                          disabled={isAiProcessing}
+                          className="px-4 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
+                        >
+                          Describe about the image
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (!isAiProcessing) {
+                              handleSpeechResult('what can you see in the image');
+                            }
+                          }}
+                          disabled={isAiProcessing}
+                          className="px-4 py-2.5 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
+                        >
+                          What can you see in the image
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (!isAiProcessing) {
+                              handleSpeechResult('what is the main thing in the image');
+                            }
+                          }}
+                          disabled={isAiProcessing}
+                          className="px-4 py-2.5 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
+                        >
+                          What is the main thing in the image
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
                                     {/* Hidden file inputs for paper clip button */}
                 {/* General file input for photo library and file selection */}
                 {/* Note: On mobile, this shows native picker with options: Photo Library, Take Photo or Video, Choose Files */}
@@ -1611,6 +1961,28 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 </svg>
               </button>
             </div>
+            {/* What can you see button - Bottom center */}
+            <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
+              <button
+                onClick={handleWhatCanYouSee}
+                disabled={isAiProcessing}
+                className={`px-6 py-3 rounded-full shadow-lg transition-all duration-200 font-semibold text-sm sm:text-base ${
+                  isAiProcessing 
+                    ? 'bg-purple-400 cursor-not-allowed text-white' 
+                    : 'bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white'
+                }`}
+                title={isAiProcessing ? 'Analyzing...' : 'What can you see right now?'}
+              >
+                {isAiProcessing ? (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Analyzing...</span>
+                  </div>
+                ) : (
+                  'What can you see right now?'
+                )}
+              </button>
+            </div>
             {/* <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2">
             <button
               onClick={() => {
@@ -1646,6 +2018,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           </div> */}
           </div>
         )}
+
+        {/* Design Panel */}
+        <DesignPanel
+          isOpen={showDesignPanel}
+          onClose={() => setShowDesignPanel(false)}
+          settings={designSettings}
+          onSettingsChange={setDesignSettings}
+        />
 
       </div>
     </>

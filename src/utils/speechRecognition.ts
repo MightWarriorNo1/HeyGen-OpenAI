@@ -46,31 +46,21 @@ export class SpeechRecognitionService {
     };
 
     // Fire as soon as browser detects ANY audio/speech activity
-    // This is the EARLIEST possible detection - interrupt avatar immediately
+    // CRITICAL: If avatar is speaking (suspended), COMPLETELY IGNORE all audio - it's echo
     this.recognition.onspeechstart = () => {
       console.log('🎤 Audio activity detected (onspeechstart)');
       
-      // CRITICAL: If avatar is speaking, interrupt IMMEDIATELY on ANY audio detection
-      // Don't wait for meaningful transcripts - interrupt as soon as audio is detected
-      if (this.isSuspended && this.onSpeechStart) {
+      // CRITICAL: If suspended, avatar is speaking - IGNORE ALL audio completely
+      // This prevents avatar's speech from being detected as user input
+      if (this.isSuspended) {
         const timeSinceAvatarStarted = Date.now() - this.avatarSpeechStartTime;
-        
-        // Only respect echo cooldown for very early detection (first 500ms)
-        // After that, any audio is likely user speech - interrupt immediately
-        if (timeSinceAvatarStarted < this.EARLY_ECHO_THRESHOLD_MS) {
-          console.log(`⚠️ Ignoring very early audio (${timeSinceAvatarStarted}ms) - likely echo from avatar start`);
-          return; // Ignore echo from avatar's own speech start
-        }
-        
-        console.log(`✅ Audio detected while avatar speaking (${timeSinceAvatarStarted}ms) - interrupting immediately`);
-        try {
-          this.onSpeechStart();
-        } catch (err) {
-          console.error('onSpeechStart handler error:', err);
-        }
-      } else if (!this.isSuspended && this.onSpeechStart) {
-        // Avatar not speaking - notify callback, but callback should check if it's safe to interrupt
-        // (e.g., initial greeting might still be protected)
+        console.log(`🚫 Ignoring audio while avatar speaking (${timeSinceAvatarStarted}ms after avatar started) - this is avatar echo, not user speech`);
+        // Don't process or interrupt - just ignore completely
+        return;
+      }
+      
+      // Avatar not speaking - this could be user speech
+      if (this.onSpeechStart) {
         try {
           this.onSpeechStart();
         } catch (err) {
@@ -110,69 +100,12 @@ export class SpeechRecognitionService {
         }
       }
 
-      // If suspended (e.g., avatar is talking), check if this is user speech for interruption
-      // IMPORTANT: While suspended, we only interrupt - we NEVER process results as user input
-      // Note: Interruption should happen via onspeechstart (faster), but we check here as fallback
+      // CRITICAL: If suspended, avatar is speaking - IGNORE ALL results completely
+      // Recognition should be stopped when suspended, but if we somehow get results, ignore them
       if (this.isSuspended) {
-        const timeSinceAvatarStarted = Date.now() - this.avatarSpeechStartTime;
-        
-        // Check for ANY audio activity (even single characters) - interrupt immediately
-        let hasAudioActivity = false;
-        let audioTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript.trim();
-          // Detect ANY audio activity (even minimal) for immediate interruption
-          if (transcript.length > 0) {
-            hasAudioActivity = true;
-            audioTranscript = transcript;
-            console.log('Audio activity detected in result while suspended:', transcript, `[${timeSinceAvatarStarted}ms after avatar started]`);
-            break;
-          }
-        }
-        
-        // If ANY audio detected while suspended, interrupt immediately
-        // The echo cooldown is handled in onspeechstart for faster response
-        if (hasAudioActivity) {
-          // Very early audio (first 500ms) might be echo - but still interrupt if we got here
-          // (onspeechstart should have caught it, but this is fallback)
-          if (timeSinceAvatarStarted < this.EARLY_ECHO_THRESHOLD_MS) {
-            console.log(`⚠️ Very early audio in result (${timeSinceAvatarStarted}ms) - might be echo, but interrupting anyway`);
-            // For very early audio, clear it as it's likely echo
-            this.clearAccumulatedText();
-          } else {
-            // After echo threshold, this is likely real user speech
-            // Keep the accumulated text to preserve user's speech that started during suspension
-            // But only if it's substantial (more than just a character or two)
-            if (audioTranscript.trim().length < 3) {
-              this.clearAccumulatedText();
-            } else {
-              console.log('✅ Preserving user speech captured during suspension:', audioTranscript);
-              this.hasPreservedUserSpeech = true; // Mark as preserved user speech
-              // Keep accumulated text - this is real user speech
-            }
-          }
-          
-          // Clear suspension so we can capture user's ongoing speech
-          this.isSuspended = false;
-          
-          console.log('✅ Audio activity detected in result - clearing suspension. Transcript:', audioTranscript);
-          
-          // Trigger interrupt callback (onspeechstart should have already done this, but ensure it)
-          if (this.onSpeechStart) {
-            try {
-              this.onSpeechStart();
-            } catch (err) {
-              console.error('onSpeechStart handler error during suspension:', err);
-            }
-          }
-          
-          // IMPORTANT: Continue processing to accumulate the full user speech
-          // Don't return here - let the normal accumulation logic handle it
-        } else {
-          // No audio activity detected, ignore this result completely
-          this.clearAccumulatedText(); // Clear any partial accumulation
-          return;
-        }
+        console.log('🚫 Ignoring result while suspended (avatar is speaking) - this is avatar echo, not user speech');
+        this.clearAccumulatedText(); // Clear any partial accumulation
+        return; // Don't process anything while avatar is speaking
       }
       let interimTranscript = '';
       let finalTranscript = '';
@@ -298,11 +231,18 @@ export class SpeechRecognitionService {
 
     this.recognition.onend = () => {
       this.isListening = false;
-      console.log('Speech recognition ended - restarting...');
+      console.log('Speech recognition ended');
       
-      // CRITICAL: Only process accumulated text if we're not suspended and not in grace period
-      // UNLESS we have preserved user speech, in which case always process it
-      // This prevents processing avatar echo that might have accumulated
+      // CRITICAL: If suspended, avatar is speaking - don't process anything and don't restart
+      // The resume() method will restart it after avatar stops (with grace period)
+      if (this.isSuspended) {
+        console.log('🚫 Recognition ended while suspended (avatar speaking) - not restarting or processing');
+        this.clearAccumulatedText();
+        return; // Don't restart or process anything while avatar is speaking
+      }
+      
+      // CRITICAL: Only process accumulated text if we're not in grace period
+      // UNLESS we have preserved user speech or user interrupted, in which case always process it
       const timeSinceAvatarEnded = this.avatarSpeechEndTime > 0 ? Date.now() - this.avatarSpeechEndTime : Infinity;
       const isInGracePeriod = timeSinceAvatarEnded < this.POST_AVATAR_GRACE_PERIOD_MS;
       
@@ -313,19 +253,19 @@ export class SpeechRecognitionService {
         this.accumulatedText = '';
         this.hasPreservedUserSpeech = false;
         this.userInterruptedAvatar = false;
-      } else if (!this.isSuspended && !isInGracePeriod && this.accumulatedText.trim().length > 0) {
+      } else if (!isInGracePeriod && this.accumulatedText.trim().length > 0) {
         console.log('Processing remaining accumulated text on end:', this.accumulatedText);
         this.onResult(this.accumulatedText.trim());
         this.accumulatedText = '';
       } else {
-        // Clear accumulated text if we're suspended or in grace period (and not preserved/interrupted)
-        if (this.isSuspended || (isInGracePeriod && !this.hasPreservedUserSpeech && !this.userInterruptedAvatar)) {
-          console.log('Clearing accumulated text on end (suspended or in grace period)');
+        // Clear accumulated text if in grace period (and not preserved/interrupted)
+        if (isInGracePeriod && !this.hasPreservedUserSpeech && !this.userInterruptedAvatar) {
+          console.log('Clearing accumulated text on end (grace period)');
           this.clearAccumulatedText();
         }
       }
       
-      // Automatically restart listening after a short delay
+      // Automatically restart listening after a short delay (only if not suspended)
       setTimeout(() => {
         if (!this.isListening && !this.isSuspended) {
           console.log('Auto-restarting speech recognition from onend...');
@@ -383,18 +323,28 @@ export class SpeechRecognitionService {
   }
 
   // Temporarily suspend recognition and prevent auto-restarts/results
-  // NOTE: We don't abort recognition to allow it to detect user speech for interruption
-  // Results are filtered by the isSuspended flag instead
+  // CRITICAL: Actually STOP the recognition to prevent it from detecting avatar's speech
+  // We'll restart it when avatar stops speaking (with a grace period)
   public suspend(): void {
     this.isSuspended = true;
     // Record when avatar started speaking to ignore echo/feedback
     this.avatarSpeechStartTime = Date.now();
-    // Don't abort recognition - keep it running to detect user speech for interruption
-    // Results will be filtered out by the isSuspended check in onresult
+    // CRITICAL: Actually STOP the recognition to prevent detecting avatar's audio
+    // This prevents the avatar's voice from being captured and processed as user speech
+    if (this.recognition && this.isListening) {
+      console.log('🛑 Stopping speech recognition to prevent capturing avatar speech');
+      try {
+        this.recognition.stop();
+        this.isListening = false;
+      } catch (err) {
+        console.error('Error stopping recognition:', err);
+      }
+    }
     this.clearAccumulatedText();
   }
 
   // Resume recognition after suspension
+  // Wait for grace period before restarting to avoid capturing tail-end echo
   public resume(): void {
     this.isSuspended = false;
     // Record when avatar stopped speaking for grace period
@@ -405,12 +355,19 @@ export class SpeechRecognitionService {
     this.userInterruptedAvatar = false;
     // Clear any accumulated text that might contain echo
     this.clearAccumulatedText();
-    this.startListening().catch(console.error);
+    
+    // Wait for grace period before restarting to avoid capturing tail-end echo
+    // Then restart recognition
+    setTimeout(() => {
+      if (!this.isSuspended && !this.isListening) {
+        console.log('🔄 Resuming speech recognition after avatar stopped (grace period passed)');
+        this.startListening().catch(console.error);
+      }
+    }, this.POST_AVATAR_GRACE_PERIOD_MS);
   }
 
   // Force clear suspension - used when user interrupts avatar
-  // Immediately clears suspension so user's ongoing speech can be captured and processed
-  // Note: suspension may already be cleared by onresult handler, so this is idempotent
+  // Immediately clears suspension and restarts recognition to capture user's speech
   public forceResume(): void {
     this.isSuspended = false;
     // Mark that user actively interrupted avatar - this disables grace period for active speech
@@ -418,48 +375,16 @@ export class SpeechRecognitionService {
     // Record when avatar was interrupted for grace period
     this.avatarSpeechEndTime = Date.now();
     
-    // Calculate time since avatar started speaking
-    const timeSinceAvatarStarted = this.avatarSpeechStartTime > 0 ? Date.now() - this.avatarSpeechStartTime : Infinity;
-    
-    // Only clear accumulated text if:
-    // 1. We're not in the early echo threshold (first 500ms) - if we are, onresult already handled it
-    // 2. The accumulated text is very short (likely echo/noise)
-    // Otherwise, preserve it as it might be user speech that started during suspension
-    if (timeSinceAvatarStarted < this.EARLY_ECHO_THRESHOLD_MS) {
-      // Very early - clear as it's definitely echo
-      this.clearAccumulatedText();
-      console.log('Force resume: Cleared early echo');
-    } else if (this.accumulatedText.trim().length < 3) {
-      // Very short text - likely noise/echo, but don't clear flag since user is actively speaking
-      this.accumulatedText = ''; // Clear text but keep interruption flag
-      console.log('Force resume: Cleared short text (likely echo), but user is actively speaking');
-    } else {
-      // Substantial text after echo period - preserve it as user speech
-      console.log('Force resume: Preserving accumulated text (likely user speech):', this.accumulatedText.substring(0, 50));
-      this.hasPreservedUserSpeech = true; // Mark this as preserved user speech
-      // Clear any existing timeout - we'll let new results or timeout handle it
-      if (this.speechTimeout) {
-        clearTimeout(this.speechTimeout);
-        this.speechTimeout = null;
-      }
-      // Set a new timeout to process the preserved text, but shorter since user already started speaking
-      this.speechTimeout = setTimeout(() => {
-        if (this.accumulatedText.trim().length > 0 && (this.hasPreservedUserSpeech || this.userInterruptedAvatar)) {
-          console.log('Processing preserved user speech after interruption:', this.accumulatedText);
-          this.onResult(this.accumulatedText.trim());
-          this.accumulatedText = '';
-          this.hasPreservedUserSpeech = false;
-          this.userInterruptedAvatar = false;
-        }
-      }, 1500); // Shorter timeout for preserved speech
-    }
+    // Clear any accumulated text - recognition was stopped, so this is likely echo
+    this.clearAccumulatedText();
+    this.hasPreservedUserSpeech = false;
     
     // Clear avatar speech start time since avatar was interrupted
     this.avatarSpeechStartTime = 0;
     
-    // Recognition should already be running (we don't abort on suspend anymore)
-    // Since recognition stays active, it can immediately capture user's ongoing speech
-    // Just ensure it's listening - if not, start it
+    // Immediately restart recognition to capture user's ongoing speech
+    // Recognition was stopped when suspended, so we need to start it again
+    console.log('🔄 Force resuming speech recognition - user interrupted avatar');
     if (!this.isListening && this.recognition) {
       this.startListening().catch(console.error);
     }
