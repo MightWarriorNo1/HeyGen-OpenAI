@@ -12,7 +12,6 @@ export class SpeechRecognitionService {
   private avatarSpeechEndTime: number = 0; // Timestamp when avatar stopped speaking
   private hasPreservedUserSpeech: boolean = false; // Flag to indicate user speech was preserved during interruption
   private userInterruptedAvatar: boolean = false; // Flag to indicate user just interrupted avatar (disables grace period for active speech)
-  private readonly EARLY_ECHO_THRESHOLD_MS = 500; // Ignore audio detected within 500ms of avatar starting (likely echo)
   private readonly POST_AVATAR_GRACE_PERIOD_MS = 1500; // Ignore speech detected within 1.5 seconds after avatar stops (tail-end echo)
 
   constructor(onResult: (text: string) => void, onError: (error: string) => void, onSpeechStart?: () => void) {
