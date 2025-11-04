@@ -35,10 +35,6 @@ function App() {
   const visionVideoRef = useRef<HTMLVideoElement>(null);
   const [visionCameraStream, setVisionCameraStream] = useState<MediaStream | null>(null);
   const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment'); // Default to rear-facing
-  const visionMonitorIntervalRef = useRef<number | null>(null);
-  const lastSampleImageDataRef = useRef<ImageData | null>(null);
-  const stabilityStartRef = useRef<number | null>(null);
-  const nextAllowedAnalysisAtRef = useRef<number>(0);
   const avatar = useRef<StreamingAvatarApi | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -56,6 +52,8 @@ function App() {
   const shouldCancelSpeechRef = useRef<boolean>(false);
   const sessionIdRef = useRef<string | null>(null); // Ref to always have current sessionId
   const isInitialGreetingRef = useRef<boolean>(false); // Flag to protect initial greeting from interruption
+  const dataRef = useRef<NewSessionData | undefined>(undefined); // Ref to always have current data for sessionId fallback
+  const isProcessingSpeechRef = useRef<boolean>(false); // Ref to track if we're currently processing speech (prevents duplicate API calls)
   const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
@@ -65,7 +63,7 @@ function App() {
   const [designSettings, setDesignSettings] = useState({
     cameraButton: {
       opacity: 1,
-      color: '#f59e0b', // amber-500
+      color: '#BC7300',
       size: 48, // p-3 = 12px padding on each side, so ~48px total
       position: {
         top: 0, // translate-y-8 = 2rem from center
@@ -74,7 +72,7 @@ function App() {
     },
     paperClipButton: {
       opacity: 1,
-      color: '#f59e0b', // amber-500
+      color: '#BC7300',
       size: 48,
       position: {
         top: 0,
@@ -323,14 +321,30 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   const handleSpeechResult = async (transcript: string) => {
     console.log('Speech result received:', transcript);
     
+    // CRITICAL: Prevent duplicate processing if we're already processing a speech result
+    // This prevents multiple API calls when multiple speech recognition results arrive quickly
+    if (isProcessingSpeechRef.current || isAiProcessing) {
+      console.log('⚠️ Skipping speech result - already processing another speech result');
+      return;
+    }
+    
+    // CRITICAL: Set processing flag immediately (synchronously) to prevent duplicate calls
+    isProcessingSpeechRef.current = true;
+    
     // CRITICAL: If avatar is still speaking, interrupt it first before processing
     if (isAvatarSpeakingRef.current) {
       console.log('⚠️ Avatar still speaking when user speech received - forcing interrupt...');
       try {
-        // Use sessionId from ref (always current), fallback to state, then data
-        const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+        // Use sessionId from ref (always current), fallback to ref data, then state
+        const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
         if (avatar.current && currentSessionId) {
           console.log('📞 Force interrupting avatar with sessionId:', currentSessionId);
+          // Set cancellation flag and clear state immediately
+          shouldCancelSpeechRef.current = true;
+          setAvatarSpeech('');
+          isAvatarSpeakingRef.current = false;
+          
+          // Call interrupt API
           await avatar.current.interrupt({
             interruptRequest: {
               sessionId: currentSessionId
@@ -341,13 +355,16 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           console.warn('⚠️ Cannot force interrupt - missing sessionId', {
             hasAvatar: !!avatar.current,
             sessionIdFromRef: sessionIdRef.current,
-            sessionIdFromState: sessionId,
-            sessionIdFromData: data?.sessionId
+            sessionIdFromDataRef: dataRef.current?.sessionId,
+            sessionIdFromState: sessionId
           });
+          // Even without sessionId, clear the state
+          setAvatarSpeech('');
+          isAvatarSpeakingRef.current = false;
         }
       } catch (err) {
         console.error('Interrupt failed:', err);
-      } finally {
+        // Even if interrupt fails, clear the state
         setAvatarSpeech('');
         isAvatarSpeakingRef.current = false;
       }
@@ -366,10 +383,28 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       // Set loading state
       setIsAiProcessing(true);
 
-      // Check if we're in camera/vision mode - if so, capture current frame and answer based on it
-      if (isVisionMode && visionVideoRef.current) {
+      // CRITICAL: Check if we're in camera/vision mode FIRST - if so, capture current frame and answer based on it
+      // This must happen before any uploaded media checks
+      // Check if camera view is active by checking if video element exists and has valid dimensions
+      // We don't rely solely on isVisionMode state as it might be out of sync
+      const hasActiveCameraView = visionVideoRef.current && 
+        visionVideoRef.current.videoWidth > 0 && 
+        visionVideoRef.current.videoHeight > 0;
+      
+      console.log('🔍 Checking vision mode:', { 
+        isVisionMode, 
+        hasVisionVideoRef: !!visionVideoRef.current,
+        videoWidth: visionVideoRef.current?.videoWidth || 0,
+        videoHeight: visionVideoRef.current?.videoHeight || 0,
+        hasVisionCameraStream: !!visionCameraStream,
+        hasActiveCameraView,
+        transcript 
+      });
+      
+      if (hasActiveCameraView && visionVideoRef.current) {
         console.log('📸 Camera mode active - capturing current frame for AI response');
         const currentFrameDataUrl = captureVisionFrameDataUrl();
+        console.log('📸 Frame capture result:', currentFrameDataUrl ? 'SUCCESS' : 'FAILED');
         
         if (currentFrameDataUrl) {
           // Build conversation history for vision
@@ -442,6 +477,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           // Add AI response to chat
           setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
           
+          // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+          speechService.current?.suspend();
+          
           // CRITICAL: After processing user speech and getting AI response, always set avatar speech
           // The speak useEffect will handle ensuring the avatar is ready to speak
           // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
@@ -467,10 +505,33 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
           // Clear loading state
           setIsAiProcessing(false);
-          return; // Exit early since we've handled vision mode
+          // CRITICAL: Exit early since we've handled vision mode - don't fall through to media checks
+          // Note: isProcessingSpeechRef will be reset in the finally block
+          return;
         } else {
-          console.warn('⚠️ Could not capture camera frame, falling back to text-only mode');
+          console.error('⚠️ Could not capture camera frame in vision mode');
+          toast({
+            variant: "destructive",
+            title: "Camera Error",
+            description: "Could not capture camera frame. Please try again.",
+          });
+          setIsAiProcessing(false);
+          // Note: isProcessingSpeechRef will be reset in the finally block
+          return;
         }
+      }
+      
+      // CRITICAL: If camera view was detected but frame capture failed, don't fall through to uploaded media
+      // This prevents confusion between camera mode and uploaded image queries
+      if (visionVideoRef.current && (visionVideoRef.current.videoWidth > 0 || visionCameraStream)) {
+        console.error('⚠️ Camera view detected but frame capture failed');
+        toast({
+          variant: "destructive",
+          title: "Camera Error",
+          description: "Could not capture camera frame. Please try again.",
+        });
+        setIsAiProcessing(false);
+        return;
       }
 
       // Get AI response using xAI with full conversation context
@@ -486,8 +547,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       })();
 
       // If user asks to describe the uploaded media, use background analysis workflow
-      const wantsMediaDescription = /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain)\b.*\b(image|photo|picture|pic)\b/i.test(transcript)
-        || /describe about the image/i.test(transcript);
+      // BUT: Skip this if camera view is active - camera mode is handled above
+      const hasActiveCamera = visionVideoRef.current && 
+        visionVideoRef.current.videoWidth > 0 && 
+        visionVideoRef.current.videoHeight > 0;
+      const wantsMediaDescription = !hasActiveCamera && (
+        /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain)\b.*\b(image|photo|picture|pic)\b/i.test(transcript)
+        || /describe about the image/i.test(transcript)
+      );
 
       if (wantsMediaDescription) {
         const latest = getLatestMediaMessage();
@@ -587,6 +654,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       // Add AI response to chat
       setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
       
+      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+      speechService.current?.suspend();
+      
       // CRITICAL: After processing user speech and getting AI response, always set avatar speech
       // The speak useEffect will handle ensuring the avatar is ready to speak
       // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
@@ -620,6 +690,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         title: "Uh oh! Something went wrong.",
         description: error.message,
       });
+    } finally {
+      // CRITICAL: Always clear processing flag, even if there was an error
+      isProcessingSpeechRef.current = false;
     }
   };
 
@@ -1028,10 +1101,11 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       setTimeout(() => {
         // Check if avatar is still speaking; if so, interrupt to speak the completion message
         if (isAvatarSpeakingRef.current && avatar.current) {
-          const currentSessionId = sessionIdRef.current || sessionId;
+          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
           if (currentSessionId) {
             console.log('Interrupting current speech to deliver completion message');
             // Reset speaking state immediately so new speech isn't blocked
+            shouldCancelSpeechRef.current = true;
             isAvatarSpeakingRef.current = false;
             // Interrupt current speech to make room for completion message
             avatar.current.interrupt({
@@ -1088,8 +1162,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           
           // CRITICAL: Actually CALL and AWAIT the interrupt - don't just fire and forget
           try {
-            // Use sessionId from ref (always current), fallback to state, then data
-            const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+            // Use sessionId from ref (always current), fallback to ref data, then state
+            // Use dataRef instead of data to avoid stale closure issues
+            const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
             
             if (avatar.current && currentSessionId) {
               console.log('📞 Calling interrupt API with sessionId:', currentSessionId);
@@ -1103,14 +1178,15 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               console.warn('⚠️ Cannot interrupt - avatar or sessionId not available', {
                 hasAvatar: !!avatar.current,
                 sessionIdFromRef: sessionIdRef.current,
+                sessionIdFromDataRef: dataRef.current?.sessionId,
                 sessionIdFromState: sessionId,
-                sessionIdFromData: data?.sessionId,
                 currentSessionId
               });
             }
           } catch (err: any) {
             console.error('❌ Interrupt API call failed:', err);
             // Even if interrupt fails, we've cleared the state and set cancel flag
+            // Try to continue anyway - the state has been cleared
           }
           
           // Immediately force resume recognition so user's ongoing speech can be captured
@@ -1142,10 +1218,30 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   useEffect(() => {
     if (isAvatarRunning && speechService.current) {
       const checkInterval = setInterval(() => {
-        // Only restart if greeting is complete
-        if (speechService.current && !speechService.current.isActive() && !isAiProcessing && !isInitialGreetingRef.current) {
+        // CRITICAL: Only restart if:
+        // 1. Greeting is complete
+        // 2. Not currently processing AI
+        // 3. Avatar is NOT speaking
+        // 4. Not in grace period (waiting for resume after avatar stopped)
+        if (speechService.current && 
+            !speechService.current.isActive() && 
+            !isAiProcessing && 
+            !isInitialGreetingRef.current &&
+            !isAvatarSpeakingRef.current &&
+            !speechService.current.isInGracePeriod()) {
           console.log('Speech recognition not active, restarting...');
           speechService.current.forceRestart();
+        } else if (speechService.current && !speechService.current.isActive()) {
+          // Log why we're not restarting (for debugging)
+          if (isAiProcessing) {
+            console.log('⚠️ Skipping restart - AI processing');
+          } else if (isInitialGreetingRef.current) {
+            console.log('⚠️ Skipping restart - initial greeting');
+          } else if (isAvatarSpeakingRef.current) {
+            console.log('⚠️ Skipping restart - avatar is speaking');
+          } else if (speechService.current.isInGracePeriod()) {
+            console.log('⚠️ Skipping restart - in grace period after avatar stopped');
+          }
         }
       }, 5000); // Check every 5 seconds
 
@@ -1157,9 +1253,17 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
   useEffect(() => {
     async function speak() {
-      // Use sessionId from ref (always current) or state, for greeting compatibility
-      const currentSessionId = sessionIdRef.current || sessionId;
+      // Use sessionId from ref (always current), fallback to ref data, then state
+      const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
       if (avatarSpeech && currentSessionId) {
+        // CRITICAL: Check cancellation flag FIRST before starting
+        if (shouldCancelSpeechRef.current) {
+          console.log('⚠️ Skipping avatar speech - cancellation flag is set');
+          setAvatarSpeech('');
+          shouldCancelSpeechRef.current = false; // Reset flag
+          return;
+        }
+        
         // CRITICAL: Reset cancellation flag at start of new speech
         shouldCancelSpeechRef.current = false;
         
@@ -1180,8 +1284,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         }
         
         try {
-          // Suspend speech recognition while avatar is speaking to avoid self-capture
+          // CRITICAL: Suspend speech recognition BEFORE setting speaking flag to avoid any race conditions
+          // Note: suspend() now keeps recognition running but marks it for careful filtering
+          // This allows user interruptions to be detected while filtering out echo
           speechService.current?.suspend();
+          // No delay needed - recognition stays active, just marked as suspended for filtering
+          
           isAvatarSpeakingRef.current = true;
           console.log('🗣️ Avatar starting to speak:', avatarSpeech.substring(0, 50) + '...');
           
@@ -1192,6 +1300,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           // Note: If interrupted, the server will stop but the promise may still resolve
           // The handleAvatarStopTalking event will handle cleanup
           const speakPromise = avatar.current?.speak({ taskRequest: { text: speechToSpeak, sessionId: currentSessionId } });
+          
+          // CRITICAL: Check cancellation flag periodically during speak
+          // If cancelled while speaking, the promise will still resolve but we'll handle it
           await speakPromise;
           
           // CRITICAL: After speak completes, check if it was cancelled/interrupted
@@ -1203,6 +1314,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             if (isInitialGreetingRef.current) {
               isInitialGreetingRef.current = false;
             }
+            // Reset cancellation flag
+            shouldCancelSpeechRef.current = false;
             // Don't update state - handleAvatarStopTalking already did it
             return;
           }
@@ -1218,6 +1331,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           console.error('Speak failed:', err);
           // If speak fails, reset speaking state
           isAvatarSpeakingRef.current = false;
+          shouldCancelSpeechRef.current = false;
           speechService.current?.resume();
         } finally {
           // Only reset speaking state if we weren't cancelled
@@ -1240,40 +1354,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       };
     }
   }, [visionCameraStream]);
-
-  // Helper: compute difference ratio between two ImageData buffers (0..1)
-  function computeFrameDifferenceRatio(a: ImageData, b: ImageData): number {
-    const dataA = a.data;
-    const dataB = b.data;
-    const length = Math.min(dataA.length, dataB.length);
-    let diffSum = 0;
-    for (let i = 0; i < length; i += 4) {
-      // Ignore alpha channel variations; compare RGB
-      const dr = Math.abs(dataA[i] - dataB[i]);
-      const dg = Math.abs(dataA[i + 1] - dataB[i + 1]);
-      const db = Math.abs(dataA[i + 2] - dataB[i + 2]);
-      diffSum += dr + dg + db;
-    }
-    // Max per pixel difference is 255*3; normalize by pixels
-    const pixels = length / 4;
-    const maxTotal = pixels * 255 * 3;
-    return diffSum / maxTotal;
-  }
-
-  // Helper: capture a downscaled frame from the vision video for fast diff
-  function sampleVisionFrame(width = 96, height = 72): ImageData | null {
-    if (!visionVideoRef.current) return null;
-    const video = visionVideoRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, width, height);
-    const imageData = ctx.getImageData(0, 0, width, height);
-    return imageData;
-  }
 
   // Helper: capture full-quality frame DataURL for analysis
   function captureVisionFrameDataUrl(quality = 0.8): string | null {
@@ -1298,68 +1378,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     return canvas.toDataURL('image/jpeg', quality);
   }
 
-  // Auto vision analysis: when camera view is stable for 3s, analyze automatically
-  useEffect(() => {
-    // Start monitoring when vision mode is on and we have a stream
-    if (isVisionMode && visionCameraStream) {
-      // Reset trackers
-      lastSampleImageDataRef.current = null;
-      stabilityStartRef.current = null;
-      // throttle to at most once every 5s
-      nextAllowedAnalysisAtRef.current = Date.now() + 3000;
-
-      const intervalId = window.setInterval(() => {
-        if (!visionVideoRef.current) return;
-        // Avoid concurrent calls
-        if (isAiProcessing) return;
-
-        const current = sampleVisionFrame();
-        if (!current) return;
-
-        const previous = lastSampleImageDataRef.current;
-        if (previous) {
-          const diffRatio = computeFrameDifferenceRatio(previous, current);
-          const STABILITY_DIFF_THRESHOLD = 0.05; // 5% average RGB difference
-          const now = Date.now();
-
-          if (diffRatio < STABILITY_DIFF_THRESHOLD) {
-            if (stabilityStartRef.current == null) {
-              stabilityStartRef.current = now;
-            }
-            const stableForMs = now - stabilityStartRef.current;
-            if (stableForMs >= 3000 && now >= nextAllowedAnalysisAtRef.current) {
-              const dataUrl = captureVisionFrameDataUrl();
-              if (dataUrl) {
-                // Set next allowed time to 6s later to avoid spamming
-                nextAllowedAnalysisAtRef.current = now + 6000;
-                handleVisionAnalysis(dataUrl);
-              }
-            }
-          } else {
-            // Movement detected, reset stability timer
-            stabilityStartRef.current = null;
-          }
-        }
-
-        lastSampleImageDataRef.current = current;
-      }, 500); // sample twice a second
-
-      visionMonitorIntervalRef.current = intervalId as unknown as number;
-
-      return () => {
-        if (visionMonitorIntervalRef.current) {
-          clearInterval(visionMonitorIntervalRef.current);
-          visionMonitorIntervalRef.current = null;
-        }
-      };
-    }
-
-    // Cleanup if not in vision mode
-    if (visionMonitorIntervalRef.current) {
-      clearInterval(visionMonitorIntervalRef.current);
-      visionMonitorIntervalRef.current = null;
-    }
-  }, [isVisionMode, visionCameraStream, isAiProcessing]);
+  // Auto vision analysis removed - AI will only analyze camera frames when user explicitly asks
+  // This prevents continuous automatic analysis that was happening before
 
 
   // useEffect called when the component mounts, to fetch the accessToken and automatically start the avatar
@@ -1422,11 +1442,21 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       
       // CRITICAL: If user interrupted and continued speaking, process their speech now
       // This ensures accumulated text gets processed even if recognition is still active
+      // Use a slightly longer delay to give recognition time to capture more of user's speech
+      // BUT: Only process if avatar is NOT already speaking a new response
       setTimeout(() => {
+        // CRITICAL: Don't process if avatar is already speaking a new response, AI is processing, or we're already processing speech
+        // This prevents processing stale speech that was already handled and prevents duplicate API calls
+        if (isAvatarSpeakingRef.current || isAiProcessing || isProcessingSpeechRef.current) {
+          console.log('⚠️ Skipping processPendingSpeech - avatar already speaking new response, AI processing, or speech already being processed');
+          return;
+        }
+        
         if (speechService.current) {
+          console.log('🔄 Processing pending user speech after interrupt...');
           speechService.current.processPendingSpeech();
         }
-      }, 300); // Small delay to ensure interruption is complete
+      }, 800); // Longer delay to allow user to finish speaking after interrupt
     } else if (isInitialGreetingRef.current) {
       // Greeting completed naturally
       console.log('✅ Initial greeting completed naturally');
@@ -1497,15 +1527,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       // Set up the media stream with proper error handling
       if (avatar.current?.mediaStream) {
         setData(res);
+        dataRef.current = res; // Also update ref for callback access
         setStream(avatar.current.mediaStream);
         setStartAvatarLoading(false);
         setIsAvatarRunning(true);
         // Greet the user after stream and session are ready
         setTimeout(() => {
           if (sessionId || newSessionId) {
-            // CRITICAL: Suspend speech recognition before greeting to prevent it from capturing avatar's voice
+            // CRITICAL: Stop speech recognition completely before greeting to prevent it from capturing avatar's voice
+            // This is more reliable than suspend() - we don't want any recognition running during initial greeting
             if (speechService.current) {
-              console.log('Suspending speech recognition before greeting...');
+              console.log('Stopping speech recognition completely before greeting...');
+              speechService.current.stopListening();
+              // Also suspend to mark that avatar will be speaking
               speechService.current.suspend();
             }
             // Mark this as initial greeting to protect it from interruption
@@ -1559,9 +1593,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to stop the avatar's speech
   const stopAvatarSpeech = async () => {
     try {
-      // Use sessionId from ref (always current), fallback to state, then data
-      const currentSessionId = sessionIdRef.current || sessionId || data?.sessionId;
+      // Use sessionId from ref (always current), fallback to ref data, then state
+      const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
       if (avatar.current && currentSessionId) {
+        // Set cancellation flag and clear state immediately
+        shouldCancelSpeechRef.current = true;
+        isAvatarSpeakingRef.current = false;
+        setAvatarSpeech('');
+        
         // Use the interrupt method to stop current speech without ending the session
         await avatar.current.interrupt({
           interruptRequest: {
@@ -1569,15 +1608,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           }
         });
 
-        // Clear the speech text
-        setAvatarSpeech('');
-
         toast({
           title: "Speech Stopped",
           description: "Avatar has stopped talking",
         });
       } else {
         // If no active session, just clear the speech text
+        shouldCancelSpeechRef.current = true;
+        isAvatarSpeakingRef.current = false;
         setAvatarSpeech('');
         toast({
           title: "Speech Stopped",
@@ -1587,6 +1625,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     } catch (error) {
       console.error('Error stopping avatar speech:', error);
       // Even if API call fails, clear the speech text
+      shouldCancelSpeechRef.current = true;
+      isAvatarSpeakingRef.current = false;
       setAvatarSpeech('');
       toast({
         title: "Speech Stopped",
@@ -1732,7 +1772,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <div 
                   className="absolute inset-x-0 top-1/2 z-20 flex justify-center"
                   style={{
-                    transform: `translateY(${2 + designSettings.cameraButton.position.top}rem)`,
+                    transform: `translateY(${6 + designSettings.cameraButton.position.top}rem)`,
                     gap: `${designSettings.buttonGap}rem`
                   }}
                 >
@@ -1768,19 +1808,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       }
                     }}
                     disabled={isAiProcessing}
-                    className="rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
                     style={{
                       opacity: designSettings.cameraButton.opacity,
                       backgroundColor: designSettings.cameraButton.color,
-                      width: `${designSettings.cameraButton.size}px`,
+                      width: `${designSettings.cameraButton.size * 1.6}px`,
                       height: `${designSettings.cameraButton.size}px`,
-                      padding: `${(designSettings.cameraButton.size - 20) / 2}px`,
-                      transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`
+                      transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`,
+                      borderRadius: '50%'
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
                   >
                     <svg 
-                      className="text-gray-700" 
+                      className="text-white" 
                       style={{ width: '20px', height: '20px' }}
                       fill="none" 
                       stroke="currentColor" 
@@ -1793,36 +1833,52 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
                   {/* Paper Clip Button */}
                   <button
-                    onClick={() => {
-                      // On mobile, iOS may block video recording if there's an active camera stream
-                      // (thinking it's an active call). We need to stop any active camera streams
-                      // before opening the file picker to allow video recording.
+                    onClick={async () => {
+                      // On mobile (especially iOS), video recording is blocked if any media stream
+                      // (audio or video) is active, as iOS treats it as an "active call".
+                      // We must stop ALL active media streams before opening the file picker.
+                      
+                      // 1. Stop speech recognition (which may have active audio tracks)
+                      if (speechService.current && speechService.current.isActive()) {
+                        console.log('Stopping speech recognition to allow video recording...');
+                        speechService.current.stopListening();
+                      }
+                      
+                      // 2. Stop vision camera stream (video tracks)
                       if (visionCameraStream) {
-                        // Temporarily stop vision camera stream to allow video recording
+                        console.log('Stopping vision camera stream to allow video recording...');
                         visionCameraStream.getTracks().forEach(t => t.stop());
                         setVisionCameraStream(null);
-                        // Exit vision mode if active
                         setIsVisionMode(false);
                       }
-                      // Small delay to ensure streams are fully stopped before opening picker
+                      
+                      // 3. Stop any active tracks from video elements
+                      if (visionVideoRef.current?.srcObject) {
+                        const stream = visionVideoRef.current.srcObject as MediaStream;
+                        stream.getTracks().forEach(t => t.stop());
+                        visionVideoRef.current.srcObject = null;
+                      }
+                      
+                      // Small delay to ensure all streams are fully stopped before opening picker
+                      // iOS needs this delay to properly release the camera/microphone
                       setTimeout(() => {
                         fileInputRef.current?.click();
-                      }, 100);
+                      }, 200);
                     }}
                     disabled={isAiProcessing}
-                    className="rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
+                    className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
                     style={{
                       opacity: designSettings.paperClipButton.opacity,
                       backgroundColor: designSettings.paperClipButton.color,
-                      width: `${designSettings.paperClipButton.size}px`,
+                      width: `${designSettings.paperClipButton.size * 1.6}px`,
                       height: `${designSettings.paperClipButton.size}px`,
-                      padding: `${(designSettings.paperClipButton.size - 20) / 2}px`,
-                      transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`
+                      transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`,
+                      borderRadius: '50%'
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
                   >
                     <svg 
-                      className="text-gray-700" 
+                      className="text-white" 
                       style={{ width: '20px', height: '20px' }}
                       fill="none" 
                       stroke="currentColor" 
@@ -1834,7 +1890,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 </div>
 
                 {/* Test Control Panel - appears when image is uploaded */}
-                {latestMediaKey && mediaAnalyses[latestMediaKey]?.status === 'ready' && (
+                {/* {latestMediaKey && mediaAnalyses[latestMediaKey]?.status === 'ready' && (
                   <div className="absolute inset-x-0 top-1/2 translate-y-24 flex justify-center z-20">
                     <div className="bg-white/95 backdrop-blur-sm rounded-xl p-4 shadow-2xl border border-white/30 max-w-md w-full mx-4">
                       <div className="text-center mb-3">
@@ -1878,7 +1934,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       </div>
                     </div>
                   </div>
-                )}
+                )} */}
                                     {/* Hidden file inputs for paper clip button */}
                 {/* General file input for photo library and file selection */}
                 {/* Note: On mobile, this shows native picker with options: Photo Library, Take Photo or Video, Choose Files */}
@@ -1899,7 +1955,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         </div>
 
         {/* Avatar Control Buttons - Only show Stop button when user has started chatting */}
-        {isAvatarRunning && !startAvatarLoading && hasUserStartedChatting && (
+        {/* {isAvatarRunning && !startAvatarLoading && hasUserStartedChatting && (
           <div className="fixed bottom-20 sm:bottom-24 left-1/2 transform -translate-x-1/2 z-30 lg:left-1/2 lg:transform-none lg:bottom-20">
             <div className="flex gap-2 sm:gap-3">
               <button
@@ -1915,7 +1971,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               </button>
             </div>
           </div>
-        )}
+        )} */}
 
         {/* Loading indicator when avatar is starting automatically */}
         {startAvatarLoading && (
@@ -1943,7 +1999,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Camera Switch Button */}
               <button
                 onClick={switchCamera}
-                className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-full shadow-lg transition-all duration-200"
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
+                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1953,7 +2010,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Exit Button */}
               <button
                 onClick={exitVisionMode}
-                className="bg-red-500 hover:bg-red-600 text-white p-3 rounded-full shadow-lg transition-all duration-200"
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
+                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
                 title="Exit Vision Mode"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1966,11 +2024,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               <button
                 onClick={handleWhatCanYouSee}
                 disabled={isAiProcessing}
-                className={`px-6 py-3 rounded-full shadow-lg transition-all duration-200 font-semibold text-sm sm:text-base ${
+                className={`px-8 py-3 shadow-lg transition-all duration-200 font-semibold text-sm sm:text-base ${
                   isAiProcessing 
                     ? 'bg-purple-400 cursor-not-allowed text-white' 
                     : 'bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white'
                 }`}
+                style={{ borderRadius: '50px' }}
                 title={isAiProcessing ? 'Analyzing...' : 'What can you see right now?'}
               >
                 {isAiProcessing ? (
@@ -2002,7 +2061,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 }
               }}
               disabled={isAiProcessing}
-              className={`p-2 rounded-full shadow-lg transition-all duration-200 ${
+              className={`shadow-lg transition-all duration-200 ${
                 isAiProcessing 
                   ? 'bg-purple-400 cursor-not-allowed' 
                   : 'bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white'
