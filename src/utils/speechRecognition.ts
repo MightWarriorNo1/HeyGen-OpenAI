@@ -12,15 +12,21 @@ export class SpeechRecognitionService {
   private avatarSpeechEndTime: number = 0; // Timestamp when avatar stopped speaking
   private hasPreservedUserSpeech: boolean = false; // Flag to indicate user speech was preserved during interruption
   private userInterruptedAvatar: boolean = false; // Flag to indicate user just interrupted avatar (disables grace period for active speech)
-  private readonly POST_AVATAR_GRACE_PERIOD_MS = 2000; // Ignore speech detected within 2 seconds after avatar stops (tail-end echo) - increased from 1.5s
+  private readonly POST_AVATAR_GRACE_PERIOD_MS = 3000; // Ignore speech detected within 3 seconds after avatar stops (tail-end echo) - increased from 2s
   private audioStream: MediaStream | null = null; // Store the audio stream to properly stop it
   private isResuming: boolean = false; // Flag to indicate we're waiting for grace period to complete
+  private currentAvatarSpeech: string = ''; // Store current avatar speech text for echo detection
 
   constructor(onResult: (text: string) => void, onError: (error: string) => void, onSpeechStart?: () => void) {
     this.onResult = onResult;
     this.onError = onError;
     this.onSpeechStart = onSpeechStart;
     this.initializeRecognition();
+  }
+
+  // Method to update current avatar speech text for echo detection
+  public setAvatarSpeech(text: string): void {
+    this.currentAvatarSpeech = text.toLowerCase().trim();
   }
 
   private initializeRecognition() {
@@ -60,13 +66,13 @@ export class SpeechRecognitionService {
       
       // CRITICAL: If suspended (avatar speaking), we still allow audio detection
       // The onresult handler will filter to distinguish user speech from echo
-      // BUT: During initial greeting period (first 3 seconds), completely ignore audio to prevent false triggers
+      // BUT: During initial protection period (first 6 seconds), completely ignore audio to prevent false triggers
       if (this.isSuspended) {
         const timeSinceAvatarStarted = this.avatarSpeechStartTime > 0 ? Date.now() - this.avatarSpeechStartTime : 0;
-        const INITIAL_GREETING_PROTECTION_MS = 3000;
+        const INITIAL_PROTECTION_MS = 6000; // Match the protection period in onresult
         
-        if (timeSinceAvatarStarted < INITIAL_GREETING_PROTECTION_MS) {
-          console.log(`🛡️ Ignoring audio during initial greeting period (${timeSinceAvatarStarted}ms < ${INITIAL_GREETING_PROTECTION_MS}ms) - this is avatar echo, not user speech`);
+        if (timeSinceAvatarStarted < INITIAL_PROTECTION_MS) {
+          console.log(`🛡️ Ignoring audio during protection period (${timeSinceAvatarStarted}ms < ${INITIAL_PROTECTION_MS}ms) - this is avatar echo, not user speech`);
           return; // Completely ignore during initial period
         }
         
@@ -95,15 +101,16 @@ export class SpeechRecognitionService {
       // CRITICAL: When suspended (avatar speaking), we need to be careful
       // We should still accumulate text to detect user interruptions, but filter out echo
       if (this.isSuspended) {
-        // CRITICAL: During the first 3 seconds of avatar speaking, ignore ALL speech completely
-        // This is especially important for the initial greeting to prevent it from being mistaken as user speech
+        // CRITICAL: During the first 6 seconds of avatar speaking, ignore ALL speech completely
+        // After 6 seconds, allow user interruptions but check for echo carefully
+        // This balances echo prevention with allowing legitimate user interruptions
         const timeSinceAvatarStarted = this.avatarSpeechStartTime > 0 ? Date.now() - this.avatarSpeechStartTime : Infinity;
-        const INITIAL_GREETING_PROTECTION_MS = 3000; // Ignore all speech for first 3 seconds (covers initial greeting)
+        const INITIAL_PROTECTION_MS = 6000; // Ignore all speech for first 6 seconds (reduced from 12s to allow interruptions)
         
-        if (timeSinceAvatarStarted < INITIAL_GREETING_PROTECTION_MS) {
-          console.log(`🛡️ Ignoring ALL speech during initial greeting period (${timeSinceAvatarStarted}ms < ${INITIAL_GREETING_PROTECTION_MS}ms) - this is avatar echo, not user speech`);
+        if (timeSinceAvatarStarted < INITIAL_PROTECTION_MS) {
+          console.log(`🛡️ Ignoring ALL speech during protection period (${timeSinceAvatarStarted}ms < ${INITIAL_PROTECTION_MS}ms) - this is avatar echo, not user speech`);
           this.clearAccumulatedText(); // Clear any accumulated text to prevent false positives
-          return; // Completely ignore during initial period
+          return; // Completely ignore during protection period
         }
         
         // Check if this looks like substantial user speech (interruption) vs echo
@@ -120,22 +127,153 @@ export class SpeechRecognitionService {
           }
         }
         
-        // Accumulate text to check if it's substantial enough to be a real interruption
-        const newText = (finalTranscript + interimTranscript).trim();
-        if (newText.length > 0) {
-          // Add to accumulated text to check if it reaches threshold
-          this.accumulatedText += newText;
+          // Accumulate text to check if it's substantial enough to be a real interruption
+          const newText = (finalTranscript + interimTranscript).trim();
+          if (newText.length > 0) {
+            // CRITICAL: Check if this text is already in accumulated text to prevent duplicates
+            // Only add if it's new text
+            if (!this.accumulatedText.includes(newText)) {
+              // Add to accumulated text first (for echo detection)
+              this.accumulatedText += newText;
+            } else {
+              console.log('⚠️ Skipping duplicate text in suspended branch:', newText);
+              return; // Skip duplicate
+            }
+          
+          // CRITICAL: Check if detected text matches or is very similar to avatar's current speech
+          // This is a strong indicator of echo - check AFTER accumulating
+          const fullDetectedText = this.accumulatedText.toLowerCase().trim();
+          // Normalize: remove punctuation, contractions, and extra spaces for better comparison
+          const normalizedDetected = fullDetectedText
+            .replace(/[^\w\s]/g, ' ') // Remove punctuation
+            .replace(/\b(ive|youve|weve|theyve|ive|dont|wont|cant|isnt|arent|wasnt|werent)\b/g, ' ') // Remove contractions
+            .replace(/\s+/g, ' ') // Normalize spaces
+            .trim();
+          const avatarSpeechLower = this.currentAvatarSpeech;
+          const normalizedAvatar = avatarSpeechLower
+            .replace(/[^\w\s]/g, ' ') // Remove punctuation
+            .replace(/\b(ive|youve|weve|theyve|ive|dont|wont|cant|isnt|arent|wasnt|werent)\b/g, ' ') // Remove contractions
+            .replace(/\s+/g, ' ') // Normalize spaces
+            .trim();
+          
+          // Check for similarity - if detected text matches avatar speech, it's echo
+          let isEcho = false;
+          if (normalizedAvatar.length > 0 && normalizedDetected.length > 0) {
+            // Extract words from both texts for comparison (ignore short words like "i", "a", "the")
+            const detectedWords = normalizedDetected.split(/\s+/).filter(w => w.length > 2);
+            const avatarWords = normalizedAvatar.split(/\s+/).filter(w => w.length > 2);
+            
+            if (detectedWords.length > 0 && avatarWords.length > 0) {
+              // Check word overlap - if 2+ words match, it's likely echo (lowered from 3)
+              // This catches cases like "I completed analyzing your images" matching "Perfect! I've completed analyzing your image..."
+              const matchingWords = detectedWords.filter(w => avatarWords.includes(w));
+              
+              // CRITICAL: If we have 2+ matching words, it's echo (lowered from 3 to catch more echo cases)
+              // This catches partial echoes like "completed analyzing your" matching "I've completed analyzing your image"
+              if (matchingWords.length >= 2) {
+                isEcho = true;
+                const detectedStart = normalizedDetected.substring(0, Math.min(60, normalizedDetected.length));
+                const avatarStart = normalizedAvatar.substring(0, Math.min(60, normalizedAvatar.length));
+                console.log(`🚫 Detected echo - ${matchingWords.length} matching words (${matchingWords.join(', ')}): "${detectedStart}..." matches "${avatarStart}..."`);
+                this.clearAccumulatedText(); // Clear echo immediately
+                return; // Ignore echo
+              }
+              
+              // Also check overlap ratio - if more than 20% of words match AND we have 1+ matching words, it's likely echo
+              // Lowered threshold to catch more cases
+              const overlapRatio = matchingWords.length / Math.max(detectedWords.length, avatarWords.length);
+              if (overlapRatio > 0.2 && matchingWords.length >= 1) {
+                isEcho = true;
+                const detectedStart = normalizedDetected.substring(0, Math.min(60, normalizedDetected.length));
+                const avatarStart = normalizedAvatar.substring(0, Math.min(60, normalizedAvatar.length));
+                console.log(`🚫 Detected echo - high word overlap (${Math.round(overlapRatio * 100)}%, ${matchingWords.length} matching words): "${detectedStart}..." matches "${avatarStart}..."`);
+                this.clearAccumulatedText(); // Clear echo immediately
+                return; // Ignore echo
+              }
+              
+              // CRITICAL: Check for consecutive word sequences - if 2+ words appear in sequence in both texts, it's echo (lowered from 3)
+              // This catches cases like "completed analyzing your" appearing in sequence in both
+              let maxConsecutiveMatches = 0;
+              // Check for 2-word sequences (more aggressive)
+              for (let i = 0; i <= detectedWords.length - 2; i++) {
+                const sequence = detectedWords.slice(i, i + 2).join(' ');
+                // Check if this 2-word sequence appears anywhere in avatar words (as consecutive words)
+                for (let j = 0; j <= avatarWords.length - 2; j++) {
+                  const avatarSequence = avatarWords.slice(j, j + 2).join(' ');
+                  if (sequence === avatarSequence) {
+                    maxConsecutiveMatches = Math.max(maxConsecutiveMatches, 2);
+                    break;
+                  }
+                }
+                if (maxConsecutiveMatches >= 2) break;
+              }
+              
+              if (maxConsecutiveMatches >= 2) {
+                isEcho = true;
+                const detectedStart = normalizedDetected.substring(0, Math.min(60, normalizedDetected.length));
+                const avatarStart = normalizedAvatar.substring(0, Math.min(60, normalizedAvatar.length));
+                console.log(`🚫 Detected echo - ${maxConsecutiveMatches} consecutive matching words in sequence: "${detectedStart}..." matches "${avatarStart}..."`);
+                this.clearAccumulatedText(); // Clear echo immediately
+                return; // Ignore echo
+              }
+            }
+            
+            // Check if detected text is a substring of avatar speech (echo detection)
+            // Check if detected text appears anywhere in avatar speech (not just at start)
+            const compareLength = Math.min(normalizedDetected.length, normalizedAvatar.length);
+            if (compareLength >= 10) { // Lowered from 20 to catch shorter echoes
+              const detectedStart = normalizedDetected.substring(0, Math.min(60, normalizedDetected.length));
+              // Check if detected text appears in avatar speech (anywhere, not just start)
+              if (normalizedAvatar.includes(detectedStart)) {
+                isEcho = true;
+                const avatarStart = normalizedAvatar.substring(0, Math.min(60, normalizedAvatar.length));
+                console.log(`🚫 Detected echo - detected text is substring of avatar speech: "${detectedStart}..." found in "${avatarStart}..."`);
+                this.clearAccumulatedText(); // Clear echo immediately
+                return; // Ignore echo
+              }
+              
+              // Also check reverse - if avatar speech start appears in detected text
+              const avatarStart = normalizedAvatar.substring(0, Math.min(60, normalizedAvatar.length));
+              if (normalizedDetected.includes(avatarStart)) {
+                isEcho = true;
+                console.log(`🚫 Detected echo - avatar speech start found in detected text: "${avatarStart}..." found in "${detectedStart}..."`);
+                this.clearAccumulatedText(); // Clear echo immediately
+                return; // Ignore echo
+              }
+              
+              // Additional check: if any significant portion (15+ chars) of detected text appears in avatar speech
+              if (normalizedDetected.length >= 15) {
+                for (let i = 0; i <= normalizedDetected.length - 15; i++) {
+                  const segment = normalizedDetected.substring(i, i + 15);
+                  if (normalizedAvatar.includes(segment)) {
+                    isEcho = true;
+                    console.log(`🚫 Detected echo - significant segment found in avatar speech: "${segment}" from "${detectedStart}..."`);
+                    this.clearAccumulatedText(); // Clear echo immediately
+                    return; // Ignore echo
+                  }
+                }
+              }
+            }
+          }
+          
           console.log(`🎤 Audio detected while avatar speaking - accumulated: "${this.accumulatedText}"`);
           
-          // CRITICAL: If accumulated text is substantial (10+ chars or multiple words), treat as user interruption
-          // This distinguishes real user speech from echo (which is usually shorter/fragmented)
+          // CRITICAL: Require substantial text to prevent false interrupts, but allow shorter phrases after protection period
+          // After protection period (6s), allow shorter interruptions to catch commands like "shut up", "stop", etc.
           const wordCount = this.accumulatedText.trim().split(/\s+/).filter(w => w.length > 0).length;
-          const isSubstantial = this.accumulatedText.trim().length >= 10 || wordCount >= 2;
+          
+          // Use different thresholds based on how long avatar has been speaking
+          // After protection period, allow shorter interruptions (like "shut up", "stop")
+          const MIN_CHARS_FOR_INTERRUPT = timeSinceAvatarStarted >= 6000 ? 10 : 50; // Lower threshold after protection period
+          const MIN_WORDS_FOR_INTERRUPT = timeSinceAvatarStarted >= 6000 ? 2 : 8; // Lower threshold after protection period
+          const MIN_INTERRUPT_DELAY_MS = 2000; // Reduced from 4000ms to 2000ms (2 seconds) to allow faster interruptions
+          
+          const isSubstantial = this.accumulatedText.trim().length >= MIN_CHARS_FOR_INTERRUPT && wordCount >= MIN_WORDS_FOR_INTERRUPT;
           
           // If substantial AND enough time has passed since avatar started (to avoid immediate echo), treat as interrupt
-          // Since we already return early for the first 3 seconds, we only need 500ms delay here
-          const MIN_INTERRUPT_DELAY_MS = 500;
-          if (isSubstantial && timeSinceAvatarStarted > MIN_INTERRUPT_DELAY_MS) {
+          // BUT: Only if we haven't detected it as echo
+          // CRITICAL: If echo was detected, always ignore regardless of thresholds
+          if (!isEcho && isSubstantial && timeSinceAvatarStarted > MIN_INTERRUPT_DELAY_MS) {
             console.log(`✅ Substantial user speech detected during avatar speech (${this.accumulatedText.trim().length} chars, ${wordCount} words) - treating as interruption`);
             this.userInterruptedAvatar = true;
             this.hasPreservedUserSpeech = true;
@@ -147,7 +285,9 @@ export class SpeechRecognitionService {
             return; // Don't continue to normal processing
           } else {
             // Not substantial yet or too soon - likely echo, but keep accumulating
+            if (!isEcho) {
             console.log(`⚠️ Audio detected but not substantial enough yet (${this.accumulatedText.trim().length} chars, ${wordCount} words, ${timeSinceAvatarStarted}ms since avatar started) - continuing to accumulate`);
+            }
             // Continue accumulating, but don't process yet
             // We'll process it if it becomes substantial
             return;
@@ -182,6 +322,45 @@ export class SpeechRecognitionService {
       // CRITICAL: If avatarSpeechEndTime is 0, avatar is currently speaking, so don't apply grace period
       const timeSinceAvatarEnded = this.avatarSpeechEndTime > 0 ? Date.now() - this.avatarSpeechEndTime : Infinity;
       const isInGracePeriod = this.avatarSpeechEndTime > 0 && timeSinceAvatarEnded < this.POST_AVATAR_GRACE_PERIOD_MS;
+      
+      // CRITICAL: If in grace period and we have avatar speech text, check for echo before processing
+      // This prevents echo from being processed even after avatar stops speaking
+      if (isInGracePeriod && this.currentAvatarSpeech.length > 0 && !this.userInterruptedAvatar) {
+        // Quick echo check: if detected text matches avatar speech, ignore it
+        let interimTranscript = '';
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        const detectedText = (finalTranscript + interimTranscript + this.accumulatedText).toLowerCase().trim();
+        const normalizedDetected = detectedText
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const normalizedAvatar = this.currentAvatarSpeech
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        
+        // Check if detected text is similar to avatar speech (echo detection)
+        if (normalizedAvatar.length > 0 && normalizedDetected.length > 0) {
+          const detectedWords = normalizedDetected.split(/\s+/).filter(w => w.length > 2);
+          const avatarWords = normalizedAvatar.split(/\s+/).filter(w => w.length > 2);
+          const matchingWords = detectedWords.filter(w => avatarWords.includes(w));
+          
+          // If 2+ words match, it's likely echo
+          if (matchingWords.length >= 2 || normalizedAvatar.includes(normalizedDetected.substring(0, 15)) || normalizedDetected.includes(normalizedAvatar.substring(0, 15))) {
+            console.log(`🚫 Ignoring echo in grace period after avatar stopped: "${detectedText.substring(0, 50)}..." matches avatar speech`);
+            this.clearAccumulatedText();
+            return; // Ignore echo
+          }
+        }
+      }
       
       // Only apply grace period if:
       // 1. User didn't actively interrupt (to allow their speech to be captured)
@@ -222,6 +401,7 @@ export class SpeechRecognitionService {
       let finalTranscript = '';
       
       // Process all results to accumulate speech
+      // CRITICAL: Only process NEW results (from resultIndex onwards) to avoid duplicates
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const transcript = event.results[i][0].transcript;
         if (event.results[i].isFinal) {
@@ -232,10 +412,48 @@ export class SpeechRecognitionService {
       }
       
       // Update accumulated text with final results
+      // CRITICAL: Only add NEW final transcript if it's not already in accumulated text
+      // This prevents duplicate accumulation when multiple events fire
       if (finalTranscript.trim().length > 0) {
-        this.accumulatedText += finalTranscript;
-        console.log('Final transcript added:', finalTranscript);
+        // Check if this final transcript is already in accumulated text
+        const finalTrimmed = finalTranscript.trim();
+        if (!this.accumulatedText.includes(finalTrimmed)) {
+          // Only add if it's new text
+          this.accumulatedText += finalTranscript;
+          console.log('Final transcript added:', finalTranscript);
+        } else {
+          console.log('⚠️ Skipping duplicate final transcript:', finalTrimmed);
+        }
         console.log('Accumulated text so far:', this.accumulatedText);
+        
+        // CRITICAL: Final echo check before processing - even if not in grace period, check if it matches avatar speech
+        // This catches echo that might have slipped through other checks
+        if (this.currentAvatarSpeech.length > 0 && !this.userInterruptedAvatar) {
+          const accumulatedNormalized = this.accumulatedText.toLowerCase().trim()
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const avatarNormalized = this.currentAvatarSpeech
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          
+          if (avatarNormalized.length > 0 && accumulatedNormalized.length > 0) {
+            const accumulatedWords = accumulatedNormalized.split(/\s+/).filter(w => w.length > 2);
+            const avatarWords = avatarNormalized.split(/\s+/).filter(w => w.length > 2);
+            const matchingWords = accumulatedWords.filter(w => avatarWords.includes(w));
+            
+            // If 2+ words match or significant overlap, it's likely echo
+            if (matchingWords.length >= 2 || 
+                (matchingWords.length >= 1 && matchingWords.length / Math.max(accumulatedWords.length, avatarWords.length) > 0.2) ||
+                avatarNormalized.includes(accumulatedNormalized.substring(0, 15)) ||
+                accumulatedNormalized.includes(avatarNormalized.substring(0, 15))) {
+              console.log(`🚫 Final echo check - detected text matches avatar speech, ignoring: "${accumulatedNormalized.substring(0, 50)}..."`);
+              this.clearAccumulatedText();
+              return; // Ignore echo
+            }
+          }
+        }
         
         // CRITICAL: If user interrupted avatar, process speech more aggressively
         // Check if the sentence seems complete (ends with punctuation or pause)
@@ -243,22 +461,25 @@ export class SpeechRecognitionService {
         const shouldProcess = this.isSentenceComplete(this.accumulatedText) || 
                               (this.userInterruptedAvatar && this.accumulatedText.trim().length > 5);
         
-        if (shouldProcess) {
-          console.log('Sentence complete or user interrupted with sufficient text, processing:', this.accumulatedText);
-          const textToProcess = this.accumulatedText.trim();
-          // CRITICAL: Clear accumulated text and flags BEFORE calling onResult
-          // This prevents double processing if onResult triggers processPendingSpeech
-          this.accumulatedText = '';
-          this.hasPreservedUserSpeech = false; // Clear preserved flag after processing
-          this.userInterruptedAvatar = false; // Clear interruption flag after processing
-          // Clear timeout since we're processing now
-          if (this.speechTimeout) {
-            clearTimeout(this.speechTimeout);
-            this.speechTimeout = null;
+          if (shouldProcess) {
+            console.log('Sentence complete or user interrupted with sufficient text, processing:', this.accumulatedText);
+            // CRITICAL: Clean duplicate words before processing
+            const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+            console.log('Cleaned text (removed duplicates):', cleanedText);
+            const textToProcess = cleanedText;
+            // CRITICAL: Clear accumulated text and flags BEFORE calling onResult
+            // This prevents double processing if onResult triggers processPendingSpeech
+            this.accumulatedText = '';
+            this.hasPreservedUserSpeech = false; // Clear preserved flag after processing
+            this.userInterruptedAvatar = false; // Clear interruption flag after processing
+            // Clear timeout since we're processing now
+            if (this.speechTimeout) {
+              clearTimeout(this.speechTimeout);
+              this.speechTimeout = null;
+            }
+            // Process the speech
+            this.onResult(textToProcess);
           }
-          // Process the speech
-          this.onResult(textToProcess);
-        }
       }
       
       // Clear any existing timeout and set a new one for interim results
@@ -290,7 +511,10 @@ export class SpeechRecognitionService {
           // OR if user just interrupted avatar (active speech after interruption)
           if ((this.hasPreservedUserSpeech || this.userInterruptedAvatar) && this.accumulatedText.trim().length > 0) {
             console.log('Speech timeout reached, processing user speech after interruption:', this.accumulatedText);
-            const textToProcess = this.accumulatedText.trim();
+            // Clean duplicate words before processing
+            const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+            console.log('Cleaned text (removed duplicates):', cleanedText);
+            const textToProcess = cleanedText;
             // Clear BEFORE processing to prevent double processing
             this.accumulatedText = '';
             this.hasPreservedUserSpeech = false; // Clear flag after processing
@@ -298,7 +522,10 @@ export class SpeechRecognitionService {
             this.onResult(textToProcess);
           } else if (!this.isSuspended && !isInGracePeriod && this.accumulatedText.trim().length > 0) {
             console.log('Speech timeout reached, processing accumulated text:', this.accumulatedText);
-            const textToProcess = this.accumulatedText.trim();
+            // Clean duplicate words before processing
+            const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+            console.log('Cleaned text (removed duplicates):', cleanedText);
+            const textToProcess = cleanedText;
             // Clear BEFORE processing
             this.accumulatedText = '';
             this.onResult(textToProcess);
@@ -386,7 +613,10 @@ export class SpeechRecognitionService {
       // If we have preserved user speech OR user just interrupted, always process it regardless of grace period
       if ((this.hasPreservedUserSpeech || this.userInterruptedAvatar) && this.accumulatedText.trim().length > 0) {
         console.log('Processing user speech on end (after interruption):', this.accumulatedText);
-        const textToProcess = this.accumulatedText.trim();
+        // Clean duplicate words before processing
+        const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+        console.log('Cleaned text (removed duplicates):', cleanedText);
+        const textToProcess = cleanedText;
         // Clear BEFORE processing to prevent double processing
         this.accumulatedText = '';
         this.hasPreservedUserSpeech = false;
@@ -394,7 +624,10 @@ export class SpeechRecognitionService {
         this.onResult(textToProcess);
       } else if (!isInGracePeriod && this.accumulatedText.trim().length > 0) {
         console.log('Processing remaining accumulated text on end:', this.accumulatedText);
-        const textToProcess = this.accumulatedText.trim();
+        // Clean duplicate words before processing
+        const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+        console.log('Cleaned text (removed duplicates):', cleanedText);
+        const textToProcess = cleanedText;
         // Clear BEFORE processing
         this.accumulatedText = '';
         this.onResult(textToProcess);
@@ -516,7 +749,7 @@ export class SpeechRecognitionService {
   // Temporarily suspend recognition and prevent auto-restarts/results
   // CRITICAL: Keep recognition running but mark as suspended so we can detect user interruptions
   // We filter results carefully to distinguish user speech from avatar echo
-  public suspend(): void {
+  public suspend(avatarSpeechText?: string): void {
     // CRITICAL: Set suspended flag FIRST to mark that avatar is speaking
     this.isSuspended = true;
     // Record when avatar started speaking to ignore echo/feedback
@@ -524,6 +757,11 @@ export class SpeechRecognitionService {
     // CRITICAL: Clear avatarSpeechEndTime since avatar is now speaking (not stopped)
     // This prevents grace period logic from triggering while avatar is speaking
     this.avatarSpeechEndTime = 0;
+    
+    // Store current avatar speech text for echo detection
+    if (avatarSpeechText) {
+      this.setAvatarSpeech(avatarSpeechText);
+    }
     
     // CRITICAL: DON'T stop recognition - keep it running so we can detect user interruptions
     // Instead, we'll carefully filter results in onresult to distinguish user speech from echo
@@ -557,6 +795,11 @@ export class SpeechRecognitionService {
       // Only clear suspended flag and resume after grace period
       this.isSuspended = false;
       this.isResuming = false;
+      
+      // Clear avatar speech text after grace period to prevent false positives in future conversations
+      // Keep it during grace period for echo detection
+      this.currentAvatarSpeech = '';
+      console.log('🔄 Cleared avatar speech text after grace period');
       
       if (!this.isSuspended && !this.isListening) {
         console.log('🔄 Resuming speech recognition after avatar stopped (grace period passed)');
@@ -676,6 +919,53 @@ export class SpeechRecognitionService {
     return endsWithPunctuation || (isLongEnough && endsWithCommonWords) || trimmedText.length > 100;
   }
 
+  // Clean up duplicate word sequences in accumulated text
+  private cleanDuplicateWords(text: string): string {
+    if (!text || text.trim().length === 0) return text;
+    
+    // First pass: Remove patterns like "yesyes", "tellyes", "tell meyes", etc.
+    // These are concatenated duplicates from interim results
+    let cleaned = text;
+    
+    // Pattern: repeated words like "yesyes", "telltell", etc.
+    cleaned = cleaned.replace(/\b(\w+)\1+\b/gi, '$1');
+    
+    // Pattern: word ending with previous word like "tellyes" when we already have "tell"
+    // This is harder to detect, so we'll handle it in the word-by-word pass below
+    
+    // Second pass: Split into words and filter out duplicates
+    const words = cleaned.split(/\s+/);
+    const cleanedWords: string[] = [];
+    let lastWord = '';
+    
+    for (let i = 0; i < words.length; i++) {
+      let word = words[i].trim();
+      if (word.length === 0) continue;
+      
+      // Remove duplicate patterns within the word itself (e.g., "yesyes" -> "yes")
+      word = word.replace(/\b(\w+)\1+\b/gi, '$1');
+      
+      // Check if word ends with previous word (e.g., "tellyes" when lastWord is "tell")
+      if (lastWord && word.toLowerCase().endsWith(lastWord.toLowerCase()) && word.length > lastWord.length) {
+        // Extract the new part
+        const newPart = word.substring(0, word.length - lastWord.length).trim();
+        if (newPart.length > 0) {
+          cleanedWords.push(newPart);
+          lastWord = newPart;
+        } else {
+          // If extracting new part leaves nothing, just skip this word (it's a duplicate)
+          continue;
+        }
+      } else if (word !== lastWord) {
+        // Only add if it's different from last word
+        cleanedWords.push(word);
+        lastWord = word;
+      }
+    }
+    
+    return cleanedWords.join(' ');
+  }
+
   public clearAccumulatedText(): void {
     this.accumulatedText = '';
     this.hasPreservedUserSpeech = false; // Clear preserved flag when clearing text
@@ -703,7 +993,10 @@ export class SpeechRecognitionService {
     // Process if user interrupted OR if we have preserved speech
     if (this.userInterruptedAvatar || this.hasPreservedUserSpeech) {
       console.log('✅ Force processing pending user speech after avatar stopped:', this.accumulatedText);
-      const textToProcess = this.accumulatedText.trim();
+      // Clean duplicate words before processing
+      const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+      console.log('Cleaned text (removed duplicates):', cleanedText);
+      const textToProcess = cleanedText;
       // Clear accumulated text BEFORE processing to prevent double processing
       this.accumulatedText = '';
       this.hasPreservedUserSpeech = false;
@@ -718,7 +1011,10 @@ export class SpeechRecognitionService {
     } else if (this.accumulatedText.trim().length > 5) {
       // Only process if we have substantial text (more than 5 chars) to avoid processing noise
       console.log('Processing accumulated text after interrupt (no flags set but substantial text):', this.accumulatedText);
-      const textToProcess = this.accumulatedText.trim();
+      // Clean duplicate words before processing
+      const cleanedText = this.cleanDuplicateWords(this.accumulatedText.trim());
+      console.log('Cleaned text (removed duplicates):', cleanedText);
+      const textToProcess = cleanedText;
       // Clear accumulated text BEFORE processing
       this.accumulatedText = '';
       this.hasPreservedUserSpeech = false;

@@ -30,10 +30,12 @@ function App() {
   const [stream, setStream] = useState<MediaStream>();
   const [, setData] = useState<NewSessionData>();
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
+  const isVisionModeRef = useRef<boolean>(false); // Ref to always have current isVisionMode
   const [sessionId, setSessionId] = useState<string | null>(null);
   const mediaStream = useRef<HTMLVideoElement>(null);
   const visionVideoRef = useRef<HTMLVideoElement>(null);
   const [visionCameraStream, setVisionCameraStream] = useState<MediaStream | null>(null);
+  const visionCameraStreamRef = useRef<MediaStream | null>(null); // Ref to always have current visionCameraStream
   const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment'); // Default to rear-facing
   const avatar = useRef<StreamingAvatarApi | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
@@ -47,6 +49,14 @@ function App() {
     errorMessage?: string;
   }>>({});
   const [latestMediaKey, setLatestMediaKey] = useState<string | null>(null);
+  const latestMediaKeyRef = useRef<string | null>(null); // Ref to always have current latestMediaKey
+  const mediaAnalysesRef = useRef<Record<string, {
+    type: 'photo' | 'video';
+    fileName: string;
+    status: 'processing' | 'ready' | 'error';
+    analysisText?: string;
+    errorMessage?: string;
+  }>>({}); // Ref to always have current mediaAnalyses
   const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
   const isAvatarSpeakingRef = useRef<boolean>(false);
   const shouldCancelSpeechRef = useRef<boolean>(false);
@@ -107,10 +117,12 @@ function App() {
   // Function to exit vision mode
   const exitVisionMode = () => {
     setIsVisionMode(false);
+    isVisionModeRef.current = false; // Also update ref
     // do not stop avatar; just remove overlay and release camera if it was owned by modal
     if (visionCameraStream) {
       visionCameraStream.getTracks().forEach(t => t.stop());
       setVisionCameraStream(null);
+      visionCameraStreamRef.current = null; // Also update ref
     }
     // Reset to default rear-facing camera when exiting
     setCameraFacingMode('environment');
@@ -132,6 +144,7 @@ function App() {
         video: { facingMode: newFacingMode }
       });
       setVisionCameraStream(stream);
+      visionCameraStreamRef.current = stream; // Also update ref
       setCameraFacingMode(newFacingMode);
     } catch (error) {
       console.error('Error switching camera:', error);
@@ -152,6 +165,7 @@ function App() {
   useEffect(() => {
     if (visionCameraStream && visionVideoRef.current) {
       visionVideoRef.current.srcObject = visionCameraStream;
+      visionCameraStreamRef.current = visionCameraStream; // Also update ref
     }
   }, [visionCameraStream]);
 
@@ -259,40 +273,64 @@ function App() {
       // Set loading state
       setIsAiProcessing(true);
 
-      // CRITICAL: Check if we're in camera/vision mode FIRST - if so, capture current frame and answer based on it
-      // This must happen before any uploaded media checks
-      // Check if camera view is active by checking if video element exists and has valid dimensions
-      // We don't rely solely on isVisionMode state as it might be out of sync
-      const hasActiveCameraView = visionVideoRef.current && 
+      // CRITICAL: Camera mode takes priority - when active, always capture and include current frame
+      // 1. Check if camera vision mode is explicitly active (isVisionMode state) - HIGHEST PRIORITY
+      // 2. Check if user is asking about uploaded media (has latestMediaKey and analysis ready)
+      // These can work together - camera frame can be included even when asking about uploaded media
+
+      // Priority 1: If camera vision mode is explicitly active, ALWAYS capture and include current frame
+      // This ensures that whenever the user asks something in camera mode, the current frame is included
+      // CRITICAL: Use ref to get latest value (state might be stale in closure)
+      // Also check if camera stream/video is actually active as a fallback
+      const currentIsVisionMode = isVisionModeRef.current || isVisionMode;
+      const currentVisionCameraStream = visionCameraStreamRef.current || visionCameraStream;
+      const hasActiveCameraStream = currentVisionCameraStream && 
+        currentVisionCameraStream.getTracks().some(track => track.readyState === 'live');
+      const hasActiveVideo = visionVideoRef.current && 
         visionVideoRef.current.videoWidth > 0 && 
         visionVideoRef.current.videoHeight > 0;
       
-      console.log('🔍 Checking vision mode:', { 
-        isVisionMode, 
-        hasVisionVideoRef: !!visionVideoRef.current,
-        videoWidth: visionVideoRef.current?.videoWidth || 0,
-        videoHeight: visionVideoRef.current?.videoHeight || 0,
-        hasVisionCameraStream: !!visionCameraStream,
-        hasActiveCameraView,
-        transcript 
-      });
-      
-      if (hasActiveCameraView && visionVideoRef.current) {
-        console.log('📸 Camera mode active - capturing current frame for AI response');
-        const currentFrameDataUrl = captureVisionFrameDataUrl();
-        console.log('📸 Frame capture result:', currentFrameDataUrl ? 'SUCCESS' : 'FAILED');
+      // Check if camera mode is active (either by state or by active camera stream)
+      if (currentIsVisionMode || (hasActiveCameraStream && hasActiveVideo)) {
+        console.log('📸 Camera mode detected:', {
+          isVisionMode: currentIsVisionMode,
+          hasActiveCameraStream,
+          hasActiveVideo,
+          videoWidth: visionVideoRef.current?.videoWidth,
+          videoHeight: visionVideoRef.current?.videoHeight
+        });
+        // Wait a bit for video to be ready if dimensions are not available yet
+        let retryCount = 0;
+        const maxRetries = 10;
+        let hasActiveCameraView = visionVideoRef.current && 
+          visionVideoRef.current.videoWidth > 0 && 
+          visionVideoRef.current.videoHeight > 0;
         
-        if (currentFrameDataUrl) {
-          // Build conversation history for vision
-          const conversationHistory = updatedMessages.map(msg => ({
-            role: msg.role as 'user' | 'assistant',
-            content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-          }));
+        // If camera view not ready, wait a bit and retry
+        while (!hasActiveCameraView && retryCount < maxRetries && visionVideoRef.current) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          hasActiveCameraView = visionVideoRef.current && 
+            visionVideoRef.current.videoWidth > 0 && 
+            visionVideoRef.current.videoHeight > 0;
+          retryCount++;
+        }
+        
+        if (hasActiveCameraView && visionVideoRef.current) {
+          console.log('📸 Camera vision mode active - capturing current frame for AI response');
+          const currentFrameDataUrl = captureVisionFrameDataUrl();
+          console.log('📸 Frame capture result:', currentFrameDataUrl ? 'SUCCESS' : 'FAILED');
+          
+          if (currentFrameDataUrl) {
+            // Build conversation history for vision
+            const conversationHistory = updatedMessages.map(msg => ({
+              role: msg.role as 'user' | 'assistant',
+              content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
+            }));
 
-          const messagesForVision = [
-            {
-              role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+            const messagesForVision = [
+              {
+                role: 'system' as const,
+                content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -309,6 +347,7 @@ VISION ANALYSIS:
 - Use your vision analysis to crack jokes while being genuinely helpful
 - Reference previous images/videos in the conversation for running gags
 - Answer questions based on what you can see in the current camera frame
+- The user is in camera mode, so you are seeing a live view from their camera
 
 CONVERSATION MEMORY:
 - Remember all previous messages, images, videos, and vision analysis
@@ -323,120 +362,122 @@ RESPONSE STYLE:
 - Keep responses helpful but entertaining
 - If someone shares media, react with humor while being genuinely helpful
 - Answer questions based on what you see in the camera view
+- Since you're in camera mode, reference what you see in the current frame
 
 Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-            },
-            ...conversationHistory.slice(0, -1), // All previous messages except the last (user's current question)
-            {
-              role: 'user' as const,
-              content: [
-                {
-                  type: 'text' as const,
-                  text: transcript
-                },
-                {
-                  type: 'image_url' as const,
-                  image_url: { url: currentFrameDataUrl, detail: 'high' as const }
-                }
-              ]
-            }
-          ];
-
-          const aiResponse = await openai.chat.completions.create({
-            model: 'grok-2-vision',
-            messages: messagesForVision,
-            temperature: 0.8,
-            max_tokens: 400
-          } as any);
-
-          const aiMessage = aiResponse.choices[0].message.content || '';
-          // Add AI response to chat
-          setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-          
-          // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-          speechService.current?.suspend();
-          
-          // CRITICAL: After processing user speech and getting AI response, always set avatar speech
-          // The speak useEffect will handle ensuring the avatar is ready to speak
-          // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
-          if (!isAvatarSpeakingRef.current) {
-            // Avatar is not speaking - safe to start speaking the response immediately
-            setAvatarSpeech(aiMessage);
-          } else {
-            // Avatar might still be in the process of stopping after interruption
-            // Wait briefly for the interrupt to complete, then set speech
-            console.log('⚠️ Avatar might still be stopping, waiting briefly before speaking response...');
-            setTimeout(() => {
-              // Double-check and set speech - the speak useEffect will handle the rest
-              if (!isAvatarSpeakingRef.current) {
-                setAvatarSpeech(aiMessage);
-              } else {
-                // Force clear and set speech - user has spoken, avatar must respond
-                console.log('⚠️ Force clearing avatar speaking flag to allow response');
-                isAvatarSpeakingRef.current = false;
-                setAvatarSpeech(aiMessage);
+              },
+              ...conversationHistory.slice(0, -1), // All previous messages except the last (user's current question)
+              {
+                role: 'user' as const,
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: transcript
+                  },
+                  {
+                    type: 'image_url' as const,
+                    image_url: { url: currentFrameDataUrl, detail: 'high' as const }
+                  }
+                ]
               }
-            }, 300);
-          }
+            ];
 
-          // Clear loading state
-          setIsAiProcessing(false);
-          // CRITICAL: Exit early since we've handled vision mode - don't fall through to media checks
-          // Note: isProcessingSpeechRef will be reset in the finally block
-          return;
+            const aiResponse = await openai.chat.completions.create({
+              model: 'grok-2-vision',
+              messages: messagesForVision,
+              temperature: 0.8,
+              max_tokens: 400
+            } as any);
+
+            const aiMessage = aiResponse.choices[0].message.content || '';
+            // Add AI response to chat
+            setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
+            
+            // CRITICAL: Suspend speech recognition BEFORE setting avatar speech
+            speechService.current?.suspend(aiMessage);
+            
+            // CRITICAL: Clear loading state FIRST, then set avatar speech
+            setIsAiProcessing(false);
+            
+            if (!isAvatarSpeakingRef.current) {
+              setAvatarSpeech(aiMessage);
+            } else {
+              setTimeout(() => {
+                if (!isAvatarSpeakingRef.current) {
+                  setAvatarSpeech(aiMessage);
+                } else {
+                  isAvatarSpeakingRef.current = false;
+                  setAvatarSpeech(aiMessage);
+                }
+              }, 300);
+            }
+            return;
+          } else {
+            console.error('⚠️ Could not capture camera frame in vision mode');
+            toast({
+              variant: "destructive",
+              title: "Camera Error",
+              description: "Could not capture camera frame. Please ensure the camera is active and try again.",
+            });
+            setIsAiProcessing(false);
+            return;
+          }
         } else {
-          console.error('⚠️ Could not capture camera frame in vision mode');
+          // Camera mode is active but video not ready
+          console.error('⚠️ Camera mode active but video not ready');
           toast({
             variant: "destructive",
-            title: "Camera Error",
-            description: "Could not capture camera frame. Please try again.",
+            title: "Camera Not Ready",
+            description: "Camera is not ready yet. Please wait a moment and try again.",
           });
           setIsAiProcessing(false);
-          // Note: isProcessingSpeechRef will be reset in the finally block
           return;
         }
       }
-      
-      // CRITICAL: If camera view was detected but frame capture failed, don't fall through to uploaded media
-      // This prevents confusion between camera mode and uploaded image queries
-      if (visionVideoRef.current && (visionVideoRef.current.videoWidth > 0 || visionCameraStream)) {
-        console.error('⚠️ Camera view detected but frame capture failed');
-        toast({
-          variant: "destructive",
-          title: "Camera Error",
-          description: "Could not capture camera frame. Please try again.",
-        });
-        setIsAiProcessing(false);
-        return;
-      }
 
-      // Get AI response using xAI with full conversation context
-      // Build optional media context if latest media analysis is ready
-      const mediaContextMessage = (() => {
-        if (!latestMediaKey) return null;
-        const analysis = mediaAnalyses[latestMediaKey];
-        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) return null;
-        return {
-          role: 'system' as const,
-          content: `Context: Recent ${analysis.type} "${analysis.fileName}" analysis is available.\n\n${analysis.analysisText}\n\nUse this when answering questions about the latest uploaded media.`
-        };
-      })();
-
-      // If user asks to describe the uploaded media, use background analysis workflow
-      // BUT: Skip this if camera view is active - camera mode is handled above
-      const hasActiveCamera = visionVideoRef.current && 
-        visionVideoRef.current.videoWidth > 0 && 
-        visionVideoRef.current.videoHeight > 0;
-      const wantsMediaDescription = !hasActiveCamera && (
-        /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain)\b.*\b(image|photo|picture|pic)\b/i.test(transcript)
-        || /describe about the image/i.test(transcript)
+      // Priority 2: If asking about uploaded media, use media context
+      // This ensures uploaded media questions are answered from stored analysis
+      // CRITICAL: Use refs to get latest values (state might be stale in closure)
+      const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
+      const currentMediaAnalyses = mediaAnalysesRef.current;
+      const hasUploadedMedia = currentLatestMediaKey && currentMediaAnalyses[currentLatestMediaKey]?.status === 'ready';
+      // Improved pattern matching to catch various ways of asking about images/videos
+      const isAskingAboutUploadedMedia = hasUploadedMedia && (
+        // Pattern 1: "tell me about [image/photo/picture]" or "tell me about the [image/photo]"
+        /tell\s+(me\s+)?(about\s+)?(the\s+)?(image|photo|picture|pic|uploaded|file|video|media)/i.test(transcript)
+        // Pattern 2: "describe [image/photo]" or "what's in [image/photo]"
+        || /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain|what\s+can\s+you\s+see)\b.*\b(image|photo|picture|pic|uploaded|file|video|media)\b/i.test(transcript)
+        // Pattern 3: "describe about the image" or "what about the image"
+        || /(describe|what|tell|talk|say)\s+(about|of)\s+(the\s+)?(image|photo|picture|pic|file|video)/i.test(transcript)
+        // Pattern 4: "what [image/photo]" or "what about [image/photo]"
+        || /what\s+(about\s+)?(the\s+)?(image|photo|picture|pic|file|video)/i.test(transcript)
+        // Pattern 5: Direct references like "the image", "the photo" when context suggests it's about uploaded media
+        || /(the\s+)?(image|photo|picture|pic|file|video)\s+(is|shows|has|contains|depicts)/i.test(transcript)
       );
 
-      if (wantsMediaDescription) {
+      console.log('🔍 Checking workflow:', { 
+        isVisionMode: currentIsVisionMode,
+        isVisionModeFromState: isVisionMode,
+        isVisionModeFromRef: isVisionModeRef.current,
+        hasActiveCameraStream,
+        hasActiveVideo,
+        hasUploadedMedia,
+        isAskingAboutUploadedMedia,
+        latestMediaKey: currentLatestMediaKey,
+        latestMediaKeyFromState: latestMediaKey,
+        latestMediaKeyFromRef: latestMediaKeyRef.current,
+        mediaAnalysesKeys: Object.keys(currentMediaAnalyses),
+        transcript 
+      });
+
+      // Priority 2: If asking about uploaded media, use media context
+      // This ensures uploaded media questions are always answered from stored analysis
+      if (isAskingAboutUploadedMedia) {
+        console.log('📎 Using uploaded media context for question');
         const latest = getLatestMediaMessage();
         const mediaInfo = latest && (latest as any).media as { file: File; type: 'photo' | 'video' } | undefined;
         const fileName = mediaInfo?.file?.name || 'the uploaded file';
-        const analysis = latestMediaKey ? mediaAnalyses[latestMediaKey] : undefined;
+        const analysis = currentLatestMediaKey ? currentMediaAnalyses[currentLatestMediaKey] : undefined;
 
         if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) {
           const waitMsg = `I'm still analyzing "${fileName}". Please wait a moment.`;
@@ -455,35 +496,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         const messagesForAnswer = [
           {
             role: 'system' as const,
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant...`
-          },
-          {
-            role: 'system' as const,
-            content: `Context: Analysis for "${analysis.fileName}" is available.\n\n${analysis.analysisText}\n\nBase your answer on this analysis when responding to the user's request.`
-          },
-          ...conversationHistory,
-          { role: 'user' as const, content: transcript }
-        ];
-
-        const aiResponse = await openai.chat.completions.create({
-          model: 'grok-2-latest',
-          messages: messagesForAnswer,
-          temperature: 0.8,
-          max_tokens: 400
-        });
-
-        const aiMessage = aiResponse.choices[0].message.content || '';
-        setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-        setAvatarSpeech(aiMessage);
-        setIsAiProcessing(false);
-        return;
-      }
-
-      const aiResponse = await openai.chat.completions.create({
-        model: 'grok-2-latest',
-        messages: [
-          {
-            role: 'system',
             content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
@@ -510,7 +522,120 @@ RESPONSE STYLE:
 
 Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
           },
-          // Inject media analysis context just before conversation turns
+          {
+            role: 'system' as const,
+            content: `CRITICAL CONTEXT: The user has uploaded a ${analysis.type} file named "${analysis.fileName}" which has been fully analyzed.
+
+ANALYSIS OF THE UPLOADED ${analysis.type.toUpperCase()}:
+${analysis.analysisText}
+
+INSTRUCTIONS:
+- The user is asking about this uploaded ${analysis.type} file
+- Base your answer ENTIRELY on the analysis provided above
+- Reference specific details from the analysis in your response
+- When the user says "the image", "the photo", "the picture", "the file", or "the video", they are referring to this uploaded file: "${analysis.fileName}"
+- Be helpful and funny while answering their question about "${analysis.fileName}"
+- DO NOT give generic responses - use the analysis content to provide specific, detailed answers`
+          },
+          ...conversationHistory,
+          { role: 'user' as const, content: transcript }
+        ];
+
+        const aiResponse = await openai.chat.completions.create({
+          model: 'grok-2-latest',
+          messages: messagesForAnswer,
+          temperature: 0.8,
+          max_tokens: 400
+        });
+
+        const aiMessage = aiResponse.choices[0].message.content || '';
+        setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
+        
+        // CRITICAL: Suspend speech recognition BEFORE setting avatar speech
+        speechService.current?.suspend(aiMessage);
+        
+        // CRITICAL: Clear loading state FIRST, then set avatar speech
+        setIsAiProcessing(false);
+        
+        if (!isAvatarSpeakingRef.current) {
+          setAvatarSpeech(aiMessage);
+        } else {
+          setTimeout(() => {
+            if (!isAvatarSpeakingRef.current) {
+              setAvatarSpeech(aiMessage);
+            } else {
+              isAvatarSpeakingRef.current = false;
+              setAvatarSpeech(aiMessage);
+            }
+          }, 300);
+        }
+        return;
+      }
+
+
+      // Priority 3: Regular conversation - ALWAYS include media context if available
+      // This ensures the AI remembers uploaded media in ALL conversations, not just when explicitly asked
+      const mediaContextMessage = (() => {
+        // CRITICAL: Use refs to get latest values (state might be stale in closure)
+        const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
+        const currentMediaAnalyses = mediaAnalysesRef.current;
+        if (!currentLatestMediaKey) return null;
+        const analysis = currentMediaAnalyses[currentLatestMediaKey];
+        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) return null;
+        return {
+          role: 'system' as const,
+          content: `IMPORTANT: The user has uploaded a ${analysis.type} file named "${analysis.fileName}" which has been analyzed.
+
+ANALYSIS OF THE UPLOADED ${analysis.type.toUpperCase()}:
+${analysis.analysisText}
+
+REMEMBER:
+- When the user mentions "the image", "the photo", "the picture", "the file", "the video", or "the uploaded media", they are referring to this file: "${analysis.fileName}"
+- Always remember this context throughout the conversation
+- Reference this analysis when answering questions that might relate to the uploaded media
+- If the user asks about "the image" or "the photo" without being specific, they mean this uploaded file: "${analysis.fileName}"`
+        };
+      })();
+
+      const aiResponse = await openai.chat.completions.create({
+        model: 'grok-2-latest',
+        messages: [
+          {
+            role: 'system',
+            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+
+PERSONALITY TRAITS:
+- Crack jokes, puns, and witty observations constantly
+- Use self-deprecating humor and playful sarcasm
+- Make pop culture references and clever wordplay
+- Be genuinely helpful while being absolutely hilarious
+- React to images/videos with funny commentary
+- Remember EVERYTHING from the conversation (text, images, videos, vision data)
+- Build on previous jokes and references throughout the conversation
+
+CONVERSATION MEMORY:
+- Remember all previous messages, images, videos, and vision analysis
+- Reference past conversation elements in your responses
+- Build running jokes and callbacks
+- Acknowledge when you're seeing something new vs. referencing something old
+${(() => {
+          const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
+          const currentMediaAnalyses = mediaAnalysesRef.current;
+          const hasMedia = currentLatestMediaKey && currentMediaAnalyses[currentLatestMediaKey]?.status === 'ready';
+          return hasMedia && currentLatestMediaKey ? `- IMPORTANT: The user has uploaded a ${currentMediaAnalyses[currentLatestMediaKey].type} file that has been analyzed. When they mention "the image", "the photo", "the picture", "the file", or "the video", they are referring to this uploaded file. Always keep this in mind when responding.` : '';
+        })()}
+
+RESPONSE STYLE:
+- Start responses with a funny observation or joke when appropriate
+- Use emojis sparingly but effectively for comedic timing
+- Vary your humor style (puns, observational comedy, absurdist humor)
+- Keep responses helpful but entertaining
+- If someone shares media, react with humor while being genuinely helpful
+
+Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
+          },
+          // CRITICAL: ALWAYS inject media analysis context if available - this ensures the AI remembers uploaded media
+          // This is included in ALL requests, not just when explicitly asking about media
           ...(mediaContextMessage ? [mediaContextMessage] : []),
           ...updatedMessages.map(msg => {
             if (msg.media) {
@@ -531,7 +656,11 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
       
       // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend();
+      speechService.current?.suspend(aiMessage);
+      
+      // CRITICAL: Clear loading state FIRST, then set avatar speech
+      // This ensures the speak useEffect can immediately process the avatar speech
+      setIsAiProcessing(false);
       
       // CRITICAL: After processing user speech and getting AI response, always set avatar speech
       // The speak useEffect will handle ensuring the avatar is ready to speak
@@ -555,9 +684,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           }
         }, 300);
       }
-
-      // Clear loading state
-      setIsAiProcessing(false);
     } catch (error: any) {
       console.error('Error processing speech result:', error);
       setIsAiProcessing(false);
@@ -618,15 +744,20 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           const mediaKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
           // Track latest media for future context
           setLatestMediaKey(mediaKey);
+          latestMediaKeyRef.current = mediaKey; // Also update ref
           // Initialize background analysis entry
-          setMediaAnalyses(prev => ({
-            ...prev,
-            [mediaKey]: {
-              type: fileType,
-              fileName: file.name,
-              status: 'processing'
-            }
-          }));
+          setMediaAnalyses(prev => {
+            const updated = {
+              ...prev,
+              [mediaKey]: {
+                type: fileType,
+                fileName: file.name,
+                status: 'processing' as const
+              }
+            };
+            mediaAnalysesRef.current = updated; // Also update ref
+            return updated;
+          });
           // Add media message to chat immediately
           const mediaMessage: ChatMessageType = {
             role: 'user',
@@ -655,7 +786,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         : `I'm analyzing your files now. Please wait until Analysis is finished...`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
       // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend();
+      speechService.current?.suspend(analyzingText);
       setAvatarSpeech(analyzingText);
     }
   };
@@ -862,18 +993,22 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       }
       const aiMessage = aiResponse.choices[0].message.content || '';
       // Store analysis in background store
-      setMediaAnalyses(prev => ({
-        ...prev,
-        [mediaKey]: {
-          type,
-          fileName: file.name,
-          status: 'ready',
-          analysisText: aiMessage
-        }
-      }));
+      setMediaAnalyses(prev => {
+        const updated = {
+          ...prev,
+          [mediaKey]: {
+            type,
+            fileName: file.name,
+            status: 'ready' as const,
+            analysisText: aiMessage
+          }
+        };
+        mediaAnalysesRef.current = updated; // Also update ref
+        return updated;
+      });
 
       // Notify user that analysis is complete for this item
-      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}" and I've got all the details locked and loaded. The analysis is finished, and I'm ready to help you with whatever you need! What questions do you have about it?`;
+      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}" and I've got all the details locked and loaded. I'm ready to help you with whatever you need! What questions do you have about it?`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: doneText }]);
       
       // Wait a bit for any previous speech to finish, then set the completion message
@@ -897,21 +1032,25 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         setTimeout(() => {
           console.log('Setting completion message:', doneText.substring(0, 50));
           // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-          speechService.current?.suspend();
+          speechService.current?.suspend(doneText);
           setAvatarSpeech(doneText);
         }, 400);
       }, 500);
     } catch (error: any) {
       console.error('Error processing media with AI:', error);
-      setMediaAnalyses(prev => ({
-        ...prev,
-        [mediaKey]: {
-          type,
-          fileName: file.name,
-          status: 'error',
-          errorMessage: error?.message || 'Failed to analyze media'
-        }
-      }));
+      setMediaAnalyses(prev => {
+        const updated = {
+          ...prev,
+          [mediaKey]: {
+            type,
+            fileName: file.name,
+            status: 'error' as const,
+            errorMessage: error?.message || 'Failed to analyze media'
+          }
+        };
+        mediaAnalysesRef.current = updated; // Also update ref
+        return updated;
+      });
       toast({
         variant: "destructive",
         title: "Error processing media",
@@ -1047,12 +1186,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         // CRITICAL: Reset cancellation flag at start of new speech
         shouldCancelSpeechRef.current = false;
         
-        // CRITICAL: Check if user is currently speaking (AI processing means user just spoke)
-        // Don't start speaking if user is in the middle of speaking
+        // CRITICAL: If AI is processing, wait for it to complete before speaking
+        // This ensures the AI response is ready before the avatar speaks
+        // But DON'T clear avatarSpeech - we'll speak it once processing completes
         if (isAiProcessing) {
-          console.log('⚠️ Skipping avatar speech - user is speaking (AI processing)');
-          // Clear the avatarSpeech since we're not speaking it
-          setAvatarSpeech('');
+          console.log('⏳ Waiting for AI processing to complete before avatar speaks...');
+          // Don't clear avatarSpeech - keep it so we can speak it after processing
+          // The useEffect will re-run when isAiProcessing becomes false
           return;
         }
         
@@ -1064,17 +1204,18 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         }
         
         try {
+          // Store the current avatarSpeech value to check if it was cleared during speak
+          const speechToSpeak = avatarSpeech;
+          
           // CRITICAL: Suspend speech recognition BEFORE setting speaking flag to avoid any race conditions
           // Note: suspend() now keeps recognition running but marks it for careful filtering
           // This allows user interruptions to be detected while filtering out echo
-          speechService.current?.suspend();
+          // Pass the avatar speech text for echo detection
+          speechService.current?.suspend(speechToSpeak);
           // No delay needed - recognition stays active, just marked as suspended for filtering
           
           isAvatarSpeakingRef.current = true;
           console.log('🗣️ Avatar starting to speak:', avatarSpeech.substring(0, 50) + '...');
-          
-          // Store the current avatarSpeech value to check if it was cleared during speak
-          const speechToSpeak = avatarSpeech;
           
           // Call speak API
           // Note: If interrupted, the server will stop but the promise may still resolve
@@ -1129,6 +1270,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   useEffect(() => {
     if (visionVideoRef.current && visionCameraStream) {
       visionVideoRef.current.srcObject = visionCameraStream;
+      visionCameraStreamRef.current = visionCameraStream; // Also update ref
       visionVideoRef.current.onloadedmetadata = () => {
         try { visionVideoRef.current && visionVideoRef.current.play(); } catch { }
       };
@@ -1316,16 +1458,17 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           if (sessionId || newSessionId) {
             // CRITICAL: Stop speech recognition completely before greeting to prevent it from capturing avatar's voice
             // This is more reliable than suspend() - we don't want any recognition running during initial greeting
+            const greetingText = 'Hello, I am 6, your personal assistant. How can I help you today?';
             if (speechService.current) {
               console.log('Stopping speech recognition completely before greeting...');
               speechService.current.stopListening();
-              // Also suspend to mark that avatar will be speaking
-              speechService.current.suspend();
+              // Also suspend to mark that avatar will be speaking, pass greeting text for echo detection
+              speechService.current.suspend(greetingText);
             }
             // Mark this as initial greeting to protect it from interruption
             isInitialGreetingRef.current = true;
             console.log('👋 Starting initial greeting...');
-            setAvatarSpeech('Hello, I am 6, your personal assistant. How can I help you today?');
+            setAvatarSpeech(greetingText);
           }
         }, 1500);
         console.log('Avatar started successfully');
@@ -1522,8 +1665,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                           video: { facingMode: 'environment' }
                         });
                         setVisionCameraStream(stream);
+                        visionCameraStreamRef.current = stream; // Also update ref
                         setCameraFacingMode('environment'); // Reset to rear-facing when opening
                         setIsVisionMode(true);
+                        isVisionModeRef.current = true; // Also update ref
                       } catch (error) {
                         console.error('Error accessing camera:', error);
                         // Fallback to front-facing if rear-facing fails
@@ -1532,8 +1677,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                             video: { facingMode: 'user' }
                           });
                           setVisionCameraStream(stream);
+                          visionCameraStreamRef.current = stream; // Also update ref
                           setCameraFacingMode('user');
                           setIsVisionMode(true);
+                          isVisionModeRef.current = true; // Also update ref
                         } catch (fallbackError) {
                           console.error('Error accessing camera (fallback):', fallbackError);
                           toast({
@@ -1586,7 +1733,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                         console.log('Stopping vision camera stream to allow video recording...');
                         visionCameraStream.getTracks().forEach(t => t.stop());
                         setVisionCameraStream(null);
+                        visionCameraStreamRef.current = null; // Also update ref
                         setIsVisionMode(false);
+                        isVisionModeRef.current = false; // Also update ref
                       }
                       
                       // 3. Stop any active tracks from video elements
