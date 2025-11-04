@@ -1605,7 +1605,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       <Toaster />
       <div className="min-h-screen bg-black">
         {/* Header - Fixed at top, mobile responsive */}
-        <div className="fixed top-0 left-0 right-0 w-full bg-white/10 backdrop-blur-sm border-b border-white/20 z-30">
+        {/* <div className="fixed top-0 left-0 right-0 w-full bg-white/10 backdrop-blur-sm border-b border-white/20 z-30">
           <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
             <div className="flex justify-between items-center">
               
@@ -1623,12 +1623,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               </button>
             </div>
           </div>
-        </div>
+        </div> */}
 
         {/* Main Content Area - Full width video container */}
-        <div className="w-full h-screen pt-16 sm:pt-20">
+        <div className="w-full h-screen">
           {/* Video Container - Full screen */}
           <div className="relative w-full h-full">
+            
             <Video
               ref={mediaStream}
               className={
@@ -1650,9 +1651,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               <>
                 {/* Paper clip and Camera buttons - adjustable design */}
                 <div 
-                  className="absolute inset-x-0 top-1/2 z-20 flex justify-center"
+                  className="absolute inset-x-0 bottom-[20%] z-20 flex justify-center"
                   style={{
-                    transform: `translateY(${6 + designSettings.cameraButton.position.top}rem)`,
+                    transform: `translateY(${designSettings.cameraButton.position.top}rem)`,
                     gap: `${designSettings.buttonGap}rem`
                   }}
                 >
@@ -1696,10 +1697,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     style={{
                       opacity: designSettings.cameraButton.opacity,
                       backgroundColor: designSettings.cameraButton.color,
-                      width: `${designSettings.cameraButton.size * 1.6}px`,
+                      width: `${designSettings.cameraButton.size * 1.2}px`,
                       height: `${designSettings.cameraButton.size}px`,
                       transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`,
-                      borderRadius: '50%'
+                      borderRadius: '9999px'
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
                   >
@@ -1756,10 +1757,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     style={{
                       opacity: designSettings.paperClipButton.opacity,
                       backgroundColor: designSettings.paperClipButton.color,
-                      width: `${designSettings.paperClipButton.size * 1.6}px`,
+                      width: `${designSettings.paperClipButton.size * 1.2}px`,
                       height: `${designSettings.paperClipButton.size}px`,
                       transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`,
-                      borderRadius: '50%'
+                      borderRadius: '9999px'
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
                   >
