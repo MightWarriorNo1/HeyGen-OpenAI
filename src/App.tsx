@@ -1605,25 +1605,16 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       <Toaster />
       <div className="min-h-screen bg-black">
         {/* Header - Fixed at top, mobile responsive */}
-        {/* <div className="fixed top-0 left-0 right-0 w-full bg-white/10 backdrop-blur-sm border-b border-white/20 z-30">
+        <div className="fixed top-0 left-0 right-0 w-full bg-transparent backdrop-blur-sm z-30">
           <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
             <div className="flex justify-between items-center">
-              
               <div className="flex-1 text-center">
-                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems – beta</h1>
+                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems.ai – beta</h1>
                 <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
               </div>
-              <button
-                onClick={() => setShowDesignPanel(true)}
-                className="px-3 py-1 text-xs bg-white/20 text-white rounded-lg hover:bg-white/30 transition-colors flex items-center gap-1"
-                title="Design Panel"
-              >
-                <Settings className="w-3 h-3" />
-                <span className="hidden sm:inline">Design</span>
-              </button>
             </div>
           </div>
-        </div> */}
+        </div>
 
         {/* Main Content Area - Full width video container */}
         <div className="w-full h-screen">
@@ -1879,6 +1870,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               autoPlay
               playsInline
               className="w-full h-full object-cover"
+              style={{
+                transform: cameraFacingMode === 'user' ? 'scaleX(-1)' : 'none'
+              }}
               muted
               controls={false}
             />
