@@ -5,7 +5,7 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2, Settings } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 import { DesignPanel } from './components/reusable/DesignPanel';
