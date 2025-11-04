@@ -28,7 +28,7 @@ function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [avatarSpeech, setAvatarSpeech] = useState<string>('');
   const [stream, setStream] = useState<MediaStream>();
-  const [data, setData] = useState<NewSessionData>();
+  const [_, setData] = useState<NewSessionData>();
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const mediaStream = useRef<HTMLVideoElement>(null);
@@ -54,7 +54,7 @@ function App() {
   const isInitialGreetingRef = useRef<boolean>(false); // Flag to protect initial greeting from interruption
   const dataRef = useRef<NewSessionData | undefined>(undefined); // Ref to always have current data for sessionId fallback
   const isProcessingSpeechRef = useRef<boolean>(false); // Ref to track if we're currently processing speech (prevents duplicate API calls)
-  const [hasUserStartedChatting, setHasUserStartedChatting] = useState<boolean>(false);
+  const [_, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
   const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
@@ -810,102 +810,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   };
 
   // Function to handle vision analysis from camera
-  const handleVisionAnalysis = async (imageDataUrl: string) => {
-    try {
-      // Ensure we are in vision mode and throttle concurrent work
-      setIsVisionMode(true);
-      setIsAiProcessing(true);
-
-      // Build conversation history for vision
-      const conversationHistory = chatMessages.map(msg => ({
-        role: msg.role as 'user' | 'assistant',
-        content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-      }));
-
-      const messages = [
-        {
-          role: 'system' as const,
-          content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-VISION ANALYSIS:
-- When analyzing images/videos, make hilarious observations about what you see
-- Point out funny details, absurd situations, or comedic elements
-- Use your vision analysis to crack jokes while being genuinely helpful
-- Reference previous images/videos in the conversation for running gags
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-        },
-        ...conversationHistory,
-        {
-          role: 'user' as const,
-          content: [
-            {
-              type: 'text' as const,
-              text: 'Analyze this camera frame. Provide concise observations and helpful context. Do not address the user; this is background analysis.'
-            },
-            {
-              type: 'image_url' as const,
-              image_url: { url: imageDataUrl, detail: 'high' as const }
-            }
-          ]
-        }
-      ];
-
-      const aiResponse = await openai.chat.completions.create({
-        model: 'grok-2-vision',
-        messages: messages,
-        temperature: 0.8,
-        max_tokens: 400
-      } as any);
-
-      const aiMessage = aiResponse.choices[0].message.content || '';
-      // Store the analysis in background; do not reply or speak until user asks
-      const mediaKey = `vision_${Date.now()}`;
-      setLatestMediaKey(mediaKey);
-      setMediaAnalyses(prev => ({
-        ...prev,
-        [mediaKey]: {
-          type: 'photo',
-          fileName: 'camera_frame',
-          status: 'ready',
-          analysisText: aiMessage
-        }
-      }));
-      setIsAiProcessing(false);
-
-    } catch (error: any) {
-      console.error('Error processing vision analysis:', error);
-      setIsAiProcessing(false);
-      setIsVisionMode(false); // Exit vision mode on error
-      toast({
-        variant: "destructive",
-        title: "Vision Analysis Error",
-        description: error.message || 'Failed to analyze the image. Please try again.',
-      });
-    }
-  };
 
   // Receive live camera stream from CameraModal when vision starts
 
@@ -1590,50 +1494,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
 
 
-  // Function to stop the avatar's speech
-  const stopAvatarSpeech = async () => {
-    try {
-      // Use sessionId from ref (always current), fallback to ref data, then state
-      const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-      if (avatar.current && currentSessionId) {
-        // Set cancellation flag and clear state immediately
-        shouldCancelSpeechRef.current = true;
-        isAvatarSpeakingRef.current = false;
-        setAvatarSpeech('');
-        
-        // Use the interrupt method to stop current speech without ending the session
-        await avatar.current.interrupt({
-          interruptRequest: {
-            sessionId: currentSessionId
-          }
-        });
 
-        toast({
-          title: "Speech Stopped",
-          description: "Avatar has stopped talking",
-        });
-      } else {
-        // If no active session, just clear the speech text
-        shouldCancelSpeechRef.current = true;
-        isAvatarSpeakingRef.current = false;
-        setAvatarSpeech('');
-        toast({
-          title: "Speech Stopped",
-          description: "Avatar has stopped talking",
-        });
-      }
-    } catch (error) {
-      console.error('Error stopping avatar speech:', error);
-      // Even if API call fails, clear the speech text
-      shouldCancelSpeechRef.current = true;
-      isAvatarSpeakingRef.current = false;
-      setAvatarSpeech('');
-      toast({
-        title: "Speech Stopped",
-        description: "Avatar has stopped talking",
-      });
-    }
-  };
 
   // (barge-in handled inline in speech start callback)
 
@@ -2020,7 +1881,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               </button>
             </div>
             {/* What can you see button - Bottom center */}
-            <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
+            {/* <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
               <button
                 onClick={handleWhatCanYouSee}
                 disabled={isAiProcessing}
@@ -2041,7 +1902,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   'What can you see right now?'
                 )}
               </button>
-            </div>
+            </div> */}
             {/* <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2">
             <button
               onClick={() => {
