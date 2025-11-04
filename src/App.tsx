@@ -41,7 +41,7 @@ function App() {
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Store background media analysis results keyed by a generated mediaKey
-  const [mediaAnalyses, setMediaAnalyses] = useState<Record<string, {
+  const [, setMediaAnalyses] = useState<Record<string, {
     type: 'photo' | 'video';
     fileName: string;
     status: 'processing' | 'ready' | 'error';
