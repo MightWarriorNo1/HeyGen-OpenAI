@@ -28,7 +28,7 @@ function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [avatarSpeech, setAvatarSpeech] = useState<string>('');
   const [stream, setStream] = useState<MediaStream>();
-  const [_, setData] = useState<NewSessionData>();
+  const [, setData] = useState<NewSessionData>();
   const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const mediaStream = useRef<HTMLVideoElement>(null);
@@ -54,7 +54,7 @@ function App() {
   const isInitialGreetingRef = useRef<boolean>(false); // Flag to protect initial greeting from interruption
   const dataRef = useRef<NewSessionData | undefined>(undefined); // Ref to always have current data for sessionId fallback
   const isProcessingSpeechRef = useRef<boolean>(false); // Ref to track if we're currently processing speech (prevents duplicate API calls)
-  const [_, setHasUserStartedChatting] = useState<boolean>(false);
+  const [, setHasUserStartedChatting] = useState<boolean>(false);
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
   const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
@@ -116,130 +116,6 @@ function App() {
     setCameraFacingMode('environment');
   };
 
-  // Function to handle "What can you see right now?" button click
-  const handleWhatCanYouSee = async () => {
-    if (!visionVideoRef.current || isAiProcessing) {
-      return;
-    }
-
-    try {
-      setIsAiProcessing(true);
-      
-      // Capture current frame
-      const currentFrameDataUrl = captureVisionFrameDataUrl();
-      if (!currentFrameDataUrl) {
-        toast({
-          variant: "destructive",
-          title: "Camera Error",
-          description: "Could not capture camera frame. Please try again.",
-        });
-        setIsAiProcessing(false);
-        return;
-      }
-
-      // Build conversation history
-      const conversationHistory = chatMessages.map(msg => ({
-        role: msg.role as 'user' | 'assistant',
-        content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-      }));
-
-      // Prepare messages for vision analysis
-      const messagesForVision = [
-        {
-          role: 'system' as const,
-          content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-VISION ANALYSIS:
-- When analyzing images/videos, make hilarious observations about what you see
-- Point out funny details, absurd situations, or comedic elements
-- Use your vision analysis to crack jokes while being genuinely helpful
-- Reference previous images/videos in the conversation for running gags
-- Answer questions based on what you can see in the current camera frame
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-- Answer questions based on what you see in the camera view
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-        },
-        ...conversationHistory,
-        {
-          role: 'user' as const,
-          content: [
-            {
-              type: 'text' as const,
-              text: 'What can you see right now? Describe what you see in the current camera view.'
-            },
-            {
-              type: 'image_url' as const,
-              image_url: { url: currentFrameDataUrl, detail: 'high' as const }
-            }
-          ]
-        }
-      ];
-
-      // Get AI response
-      const aiResponse = await openai.chat.completions.create({
-        model: 'grok-2-vision',
-        messages: messagesForVision,
-        temperature: 0.8,
-        max_tokens: 400
-      } as any);
-
-      const aiMessage = aiResponse.choices[0].message.content || '';
-      
-      // Add AI response to chat
-      setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-      
-      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend();
-      
-      // Make avatar speak the analysis
-      if (!isAvatarSpeakingRef.current) {
-        setAvatarSpeech(aiMessage);
-      } else {
-        // Wait briefly for avatar to finish, then speak
-        setTimeout(() => {
-          if (!isAvatarSpeakingRef.current) {
-            setAvatarSpeech(aiMessage);
-          } else {
-            // Force clear and set speech
-            isAvatarSpeakingRef.current = false;
-            setAvatarSpeech(aiMessage);
-          }
-        }, 300);
-      }
-
-      setIsAiProcessing(false);
-    } catch (error: any) {
-      console.error('Error analyzing camera view:', error);
-      setIsAiProcessing(false);
-      toast({
-        variant: "destructive",
-        title: "Analysis Error",
-        description: error.message || 'Failed to analyze the camera view. Please try again.',
-      });
-    }
-  };
 
   // Function to switch camera facing mode
   const switchCamera = async () => {
