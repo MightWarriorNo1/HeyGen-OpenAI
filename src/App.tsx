@@ -72,7 +72,7 @@ function App() {
   // Design settings for mobile buttons
   const [designSettings, setDesignSettings] = useState({
     cameraButton: {
-      opacity: 1,
+      opacity: 0.8,
       color: '#BC7300',
       size: 48, // p-3 = 12px padding on each side, so ~48px total
       position: {
@@ -81,7 +81,7 @@ function App() {
       }
     },
     paperClipButton: {
-      opacity: 1,
+      opacity: 0.8,
       color: '#BC7300',
       size: 48,
       position: {
@@ -1661,6 +1661,39 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Camera Button */}
                   <button
                     onClick={async () => {
+                      // CRITICAL: If avatar is currently talking, interrupt it when entering vision mode
+                      if (isAvatarSpeakingRef.current && avatar.current) {
+                        console.log('🛑 Vision mode activated - interrupting avatar...');
+                        try {
+                          // Use sessionId from ref (always current), fallback to ref data, then state
+                          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
+                          if (currentSessionId) {
+                            // Set cancellation flag and clear state immediately
+                            shouldCancelSpeechRef.current = true;
+                            setAvatarSpeech('');
+                            isAvatarSpeakingRef.current = false;
+                            
+                            // Call interrupt API
+                            await avatar.current.interrupt({
+                              interruptRequest: {
+                                sessionId: currentSessionId
+                              }
+                            });
+                            console.log('✅ Avatar interrupted successfully when entering vision mode');
+                          } else {
+                            console.warn('⚠️ Cannot interrupt - missing sessionId');
+                            // Even without sessionId, clear the state
+                            setAvatarSpeech('');
+                            isAvatarSpeakingRef.current = false;
+                          }
+                        } catch (err) {
+                          console.error('Interrupt failed when entering vision mode:', err);
+                          // Even if interrupt fails, clear the state
+                          setAvatarSpeech('');
+                          isAvatarSpeakingRef.current = false;
+                        }
+                      }
+                      
                       try {
                         // Default to rear-facing camera (environment)
                         const stream = await navigator.mediaDevices.getUserMedia({
@@ -1890,8 +1923,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Camera Switch Button */}
               <button
                 onClick={switchCamera}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
+                style={{ 
+                  width: '57.6px', // 48 * 1.2 to match camera/paper clip buttons
+                  height: '48px',
+                  borderRadius: '9999px', 
+                  backgroundColor: '#BC7300',
+                  opacity: 0.8
+                }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1901,8 +1940,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Exit Button */}
               <button
                 onClick={exitVisionMode}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
+                style={{ 
+                  width: '57.6px', // 48 * 1.2 to match camera/paper clip buttons
+                  height: '48px',
+                  borderRadius: '9999px', 
+                  backgroundColor: '#BC7300',
+                  opacity: 0.8
+                }}
                 title="Exit Vision Mode"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
