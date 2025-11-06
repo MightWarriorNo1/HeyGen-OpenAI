@@ -277,14 +277,11 @@ export class SpeechRecognitionService {
             console.log(`✅ Substantial user speech detected during avatar speech (${this.accumulatedText.trim().length} chars, ${wordCount} words) - treating as interruption`);
             this.userInterruptedAvatar = true;
             this.hasPreservedUserSpeech = true;
-            // COMMENTED OUT: Process the interruption immediately
-            // After interruption, avatar should wait for user to speak another utterance
-            // const textToProcess = this.accumulatedText.trim();
-            // this.accumulatedText = ''; // Clear before processing
+            // Process the interruption immediately
+            const textToProcess = this.accumulatedText.trim();
+            this.accumulatedText = ''; // Clear before processing
             // Call onResult to trigger interrupt handling
-            // this.onResult(textToProcess);
-            // Keep accumulated text for when user speaks again
-            console.log('🛑 Interruption detected - avatar will stop and wait for next user utterance');
+            this.onResult(textToProcess);
             return; // Don't continue to normal processing
           } else {
             // Not substantial yet or too soon - likely echo, but keep accumulating

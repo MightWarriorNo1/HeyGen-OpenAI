@@ -72,7 +72,7 @@ function App() {
   // Design settings for mobile buttons
   const [designSettings, setDesignSettings] = useState({
     cameraButton: {
-      opacity: 0.8,
+      opacity: 1,
       color: '#BC7300',
       size: 48, // p-3 = 12px padding on each side, so ~48px total
       position: {
@@ -81,7 +81,7 @@ function App() {
       }
     },
     paperClipButton: {
-      opacity: 0.8,
+      opacity: 1,
       color: '#BC7300',
       size: 48,
       position: {
@@ -222,7 +222,6 @@ function App() {
     isProcessingSpeechRef.current = true;
     
     // CRITICAL: If avatar is still speaking, interrupt it first before processing
-    // COMMENTED OUT: After interruption, avatar should wait for user to speak another utterance
     if (isAvatarSpeakingRef.current) {
       console.log('⚠️ Avatar still speaking when user speech received - forcing interrupt...');
       try {
@@ -259,12 +258,6 @@ function App() {
         setAvatarSpeech('');
         isAvatarSpeakingRef.current = false;
       }
-      
-      // COMMENTED OUT: Don't process speech immediately after interruption
-      // Avatar should wait for user to speak again before processing
-      console.log('🛑 Avatar interrupted - waiting for next user utterance before processing');
-      isProcessingSpeechRef.current = false; // Clear processing flag
-      return; // Exit early - don't process the speech that caused the interruption
     }
     
     try {
@@ -1369,26 +1362,23 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         isInitialGreetingRef.current = false;
       }
       
-      // COMMENTED OUT: Process pending speech after interruption
-      // After interruption, avatar should wait for user to speak another utterance before processing
       // CRITICAL: If user interrupted and continued speaking, process their speech now
       // This ensures accumulated text gets processed even if recognition is still active
       // Use a slightly longer delay to give recognition time to capture more of user's speech
       // BUT: Only process if avatar is NOT already speaking a new response
-      // setTimeout(() => {
-      //   // CRITICAL: Don't process if avatar is already speaking a new response, AI is processing, or we're already processing speech
-      //   // This prevents processing stale speech that was already handled and prevents duplicate API calls
-      //   if (isAvatarSpeakingRef.current || isAiProcessing || isProcessingSpeechRef.current) {
-      //     console.log('⚠️ Skipping processPendingSpeech - avatar already speaking new response, AI processing, or speech already being processed');
-      //     return;
-      //   }
-      //   
-      //   if (speechService.current) {
-      //     console.log('🔄 Processing pending user speech after interrupt...');
-      //     speechService.current.processPendingSpeech();
-      //   }
-      // }, 800); // Longer delay to allow user to finish speaking after interrupt
-      console.log('🛑 Avatar interrupted - waiting for user to speak again before processing');
+      setTimeout(() => {
+        // CRITICAL: Don't process if avatar is already speaking a new response, AI is processing, or we're already processing speech
+        // This prevents processing stale speech that was already handled and prevents duplicate API calls
+        if (isAvatarSpeakingRef.current || isAiProcessing || isProcessingSpeechRef.current) {
+          console.log('⚠️ Skipping processPendingSpeech - avatar already speaking new response, AI processing, or speech already being processed');
+          return;
+        }
+        
+        if (speechService.current) {
+          console.log('🔄 Processing pending user speech after interrupt...');
+          speechService.current.processPendingSpeech();
+        }
+      }, 800); // Longer delay to allow user to finish speaking after interrupt
     } else if (isInitialGreetingRef.current) {
       // Greeting completed naturally
       console.log('✅ Initial greeting completed naturally');
@@ -1661,39 +1651,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Camera Button */}
                   <button
                     onClick={async () => {
-                      // CRITICAL: If avatar is currently talking, interrupt it when entering vision mode
-                      if (isAvatarSpeakingRef.current && avatar.current) {
-                        console.log('🛑 Vision mode activated - interrupting avatar...');
-                        try {
-                          // Use sessionId from ref (always current), fallback to ref data, then state
-                          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-                          if (currentSessionId) {
-                            // Set cancellation flag and clear state immediately
-                            shouldCancelSpeechRef.current = true;
-                            setAvatarSpeech('');
-                            isAvatarSpeakingRef.current = false;
-                            
-                            // Call interrupt API
-                            await avatar.current.interrupt({
-                              interruptRequest: {
-                                sessionId: currentSessionId
-                              }
-                            });
-                            console.log('✅ Avatar interrupted successfully when entering vision mode');
-                          } else {
-                            console.warn('⚠️ Cannot interrupt - missing sessionId');
-                            // Even without sessionId, clear the state
-                            setAvatarSpeech('');
-                            isAvatarSpeakingRef.current = false;
-                          }
-                        } catch (err) {
-                          console.error('Interrupt failed when entering vision mode:', err);
-                          // Even if interrupt fails, clear the state
-                          setAvatarSpeech('');
-                          isAvatarSpeakingRef.current = false;
-                        }
-                      }
-                      
                       try {
                         // Default to rear-facing camera (environment)
                         const stream = await navigator.mediaDevices.getUserMedia({
@@ -1923,14 +1880,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Camera Switch Button */}
               <button
                 onClick={switchCamera}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
-                style={{ 
-                  width: '57.6px', // 48 * 1.2 to match camera/paper clip buttons
-                  height: '48px',
-                  borderRadius: '9999px', 
-                  backgroundColor: '#BC7300',
-                  opacity: 0.8
-                }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
+                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1940,14 +1891,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Exit Button */}
               <button
                 onClick={exitVisionMode}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
-                style={{ 
-                  width: '57.6px', // 48 * 1.2 to match camera/paper clip buttons
-                  height: '48px',
-                  borderRadius: '9999px', 
-                  backgroundColor: '#BC7300',
-                  opacity: 0.8
-                }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
+                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
                 title="Exit Vision Mode"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
