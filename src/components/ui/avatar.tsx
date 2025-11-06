@@ -13,6 +13,16 @@ const Avatar = React.forwardRef<
       "relative flex h-10 w-10 shrink-0 overflow-hidden rounded-full",
       className
     )}
+    style={{
+      WebkitTransform: 'translateZ(0)',
+      transform: 'translateZ(0)',
+      WebkitBackfaceVisibility: 'hidden',
+      backfaceVisibility: 'hidden',
+      WebkitPerspective: '1000px',
+      perspective: '1000px',
+      WebkitMaskImage: '-webkit-radial-gradient(circle, white 100%, black 100%)',
+      maskImage: 'radial-gradient(circle, white 100%, black 100%)'
+    }}
     {...props}
   />
 ))
@@ -24,7 +34,18 @@ const AvatarImage = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AvatarPrimitive.Image
     ref={ref}
-    className={cn("aspect-square h-full w-full", className)}
+    className={cn("aspect-square h-full w-full object-cover", className)}
+    style={{
+      WebkitTransform: 'translateZ(0)',
+      transform: 'translateZ(0)',
+      WebkitBackfaceVisibility: 'hidden',
+      backfaceVisibility: 'hidden',
+      WebkitPerspective: '1000px',
+      perspective: '1000px',
+      WebkitMaskImage: '-webkit-radial-gradient(circle, white 100%, black 100%)',
+      maskImage: 'radial-gradient(circle, white 100%, black 100%)',
+      imageRendering: 'auto'
+    }}
     {...props}
   />
 ))
@@ -40,6 +61,16 @@ const AvatarFallback = React.forwardRef<
       "flex h-full w-full items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800",
       className
     )}
+    style={{
+      WebkitTransform: 'translateZ(0)',
+      transform: 'translateZ(0)',
+      WebkitBackfaceVisibility: 'hidden',
+      backfaceVisibility: 'hidden',
+      WebkitPerspective: '1000px',
+      perspective: '1000px',
+      WebkitMaskImage: '-webkit-radial-gradient(circle, white 100%, black 100%)',
+      maskImage: 'radial-gradient(circle, white 100%, black 100%)'
+    }}
     {...props}
   />
 ))
