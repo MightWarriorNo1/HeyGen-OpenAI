@@ -1,38 +1,35 @@
 // src/components/reusable/Video.tsx
 import { forwardRef } from 'react';
 
-interface VideoProps {
-  className?: string;
-  onClick?: () => void;
-}
-
-const Video = forwardRef<HTMLVideoElement, VideoProps>(({ className = "", onClick }, ref) => {
-  // Check if className contains positioning classes (fixed, absolute, relative, etc.)
-  const hasPositioning = /(fixed|absolute|relative|sticky)/.test(className);
-  
-  // If positioning classes are present, apply them to wrapper; otherwise use default full-screen
-  const wrapperClassName = hasPositioning 
-    ? className 
-    : "w-full h-full";
-  
-  // Video element class - use full size if wrapper has positioning, otherwise use provided className
-  const videoClassName = hasPositioning
-    ? "w-full h-full object-cover rounded-lg"
-    : `w-full h-full object-cover rounded-lg lg:rounded-none ${className}`;
-  
-  return (
-    <div className={wrapperClassName}>
-      <video 
-        playsInline 
-        autoPlay 
-        ref={ref} 
-        className={videoClassName}
-        muted={false}
-        controls={false}
-        onClick={onClick}
-      />
-    </div>
-  );
-});
+const Video = forwardRef<HTMLVideoElement, object>((_, ref) => (
+  <video 
+    playsInline 
+    autoPlay 
+    loop
+    ref={ref} 
+    className="w-full h-full object-cover" 
+    style={{ 
+      backgroundColor: '#000',
+      minHeight: '100vh',
+      minWidth: '100vw'
+    }}
+    onError={(e) => {
+      console.error('Video error:', e);
+    }}
+    onLoadStart={() => {
+      console.log('Video loading started');
+    }}
+    onCanPlay={() => {
+      console.log('Video can play');
+    }}
+    onLoadedMetadata={() => {
+      // Set volume to maximum when video loads
+      if (ref && typeof ref !== 'function' && ref.current) {
+        ref.current.volume = 1.0;
+        ref.current.muted = false;
+      }
+    }}
+  />
+));
 
 export { Video };

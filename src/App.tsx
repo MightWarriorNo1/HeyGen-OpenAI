@@ -1,1977 +1,2486 @@
-import { useToast } from "@/hooks/use-toast";
-import { useEffect, useRef, useState } from 'react';
+/*eslint-disable*/
+import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import OpenAI from 'openai';
-import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/streaming-avatar';
-import { getAccessToken } from './services/api';
+import { 
+  getSessionToken, 
+  createNewSession, 
+  startStreamingSession, 
+  sendTextToAvatar, 
+  stopStreamingSession,
+  SessionInfo 
+} from './services/api';
+import { LiveKitService } from './services/livekit';
 import { Video } from './components/reusable/Video';
-import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from 'lucide-react';
-import { SpeechRecognitionService } from './utils/speechRecognition';
-import AvatarTest from './components/reusable/AvatarTest';
-import { DesignPanel } from './components/reusable/DesignPanel';
+import { createApiCall } from './utils/api-helpers';
+import { Button } from "@/components/ui/button";
+import { Camera, Paperclip } from "lucide-react";
 
-interface ChatMessageType {
-  role: string;
-  message: string;
-  media?: {
-    file: File;
-    type: 'photo' | 'video';
-  };
-  // Optional key to link this message to a background media analysis entry
-  mediaKey?: string;
-};
+// Lazy load heavy components for faster initial load
+const Badges = lazy(() => import('./components/reusable/Badges').then(module => ({ default: module.Badges })));
+const BrandHeader = lazy(() => import('./components/reusable/BrandHeader'));
+const CameraVideo = lazy(() => import('./components/reusable/CameraVideo').then(module => ({ default: module.CameraVideo })));
+
 
 function App() {
-  //Toast
-  const { toast } = useToast()
 
-  const [isListening, setIsListening] = useState<boolean>(false);
-  const [avatarSpeech, setAvatarSpeech] = useState<string>('');
+  const [startLoading, setStartLoading] = useState<boolean>(false);
+  const [selectedPrompt, setSelectedPrompt] = useState<string>('');
+  const [input, setInput] = useState<string>('');
+  const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
+  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
   const [stream, setStream] = useState<MediaStream>();
-  const [, setData] = useState<NewSessionData>();
-  const [isVisionMode, setIsVisionMode] = useState<boolean>(false);
-  const isVisionModeRef = useRef<boolean>(false); // Ref to always have current isVisionMode
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [, setData] = useState<SessionInfo>();
   const mediaStream = useRef<HTMLVideoElement>(null);
-  const visionVideoRef = useRef<HTMLVideoElement>(null);
-  const [visionCameraStream, setVisionCameraStream] = useState<MediaStream | null>(null);
-  const visionCameraStreamRef = useRef<MediaStream | null>(null); // Ref to always have current visionCameraStream
-  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment'); // Default to rear-facing
-  const avatar = useRef<StreamingAvatarApi | null>(null);
-  const speechService = useRef<SpeechRecognitionService | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  // Store background media analysis results keyed by a generated mediaKey
-  const [, setMediaAnalyses] = useState<Record<string, {
-    type: 'photo' | 'video';
-    fileName: string;
-    status: 'processing' | 'ready' | 'error';
-    analysisText?: string;
-    errorMessage?: string;
-  }>>({});
-  const [latestMediaKey, setLatestMediaKey] = useState<string | null>(null);
-  const latestMediaKeyRef = useRef<string | null>(null); // Ref to always have current latestMediaKey
-  const mediaAnalysesRef = useRef<Record<string, {
-    type: 'photo' | 'video';
-    fileName: string;
-    status: 'processing' | 'ready' | 'error';
-    analysisText?: string;
-    errorMessage?: string;
-  }>>({}); // Ref to always have current mediaAnalyses
-  const [isAvatarFullScreen, setIsAvatarFullScreen] = useState<boolean>(false);
-  const isAvatarSpeakingRef = useRef<boolean>(false);
-  const shouldCancelSpeechRef = useRef<boolean>(false);
-  const sessionIdRef = useRef<string | null>(null); // Ref to always have current sessionId
-  const isInitialGreetingRef = useRef<boolean>(false); // Flag to protect initial greeting from interruption
-  const dataRef = useRef<NewSessionData | undefined>(undefined); // Ref to always have current data for sessionId fallback
-  const isProcessingSpeechRef = useRef<boolean>(false); // Ref to track if we're currently processing speech (prevents duplicate API calls)
-  const [, setHasUserStartedChatting] = useState<boolean>(false);
-  const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
-  const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
-  const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
+  const liveKitService = useRef<LiveKitService | null>(null);
   
-  // Design settings for mobile buttons
-  const [designSettings, setDesignSettings] = useState({
-    cameraButton: {
-      opacity: 1,
-      color: '#BC7300',
-      size: 48, // p-3 = 12px padding on each side, so ~48px total
-      position: {
-        top: 0, // translate-y-8 = 2rem from center
-        left: 0
-      }
-    },
-    paperClipButton: {
-      opacity: 1,
-      color: '#BC7300',
-      size: 48,
-      position: {
-        top: 0,
-        left: 0
-      }
-    },
-    buttonGap: 1 // gap-4 = 1rem
-  });
-  const [chatMessages, setChatMessages] = useState<ChatMessageType[]>([
-    // {
-    //   role: 'user',
-    //   message: 'hi, how are you!'
-    // },
-    // {
-    //   role: 'assistant',
-    //   message: 'I am fine, Thank you for asking. How about you!'
-    // },
-    // {
-    //   role: 'user',
-    //   message: 'Explain me about python!'
-    // },
-    // {
-    //   role: 'assistant',
-    //   message: "Python is an interpreted, object-oriented, high-level programming language with dynamic semantics. Its high-level built in data structures, combined with dynamic typing and dynamic binding, make it very attractive for Rapid Application Development, as well as for use as a scripting or glue language to connect existing components together. Python's simple, easy to learn syntax emphasizes readability and therefore reduces the cost of program maintenance. Python supports modules and packages, which encourages program modularity and code reuse. The Python interpreter and the extensive standard library are available in source or binary form without charge for all major platforms, and can be freely distributed."
-    // },
-    // {
-    //   role: 'user',
-    //   message: 'hi, how are you!'
-    // },
-
-  ]);
-  // Function to exit vision mode
-  const exitVisionMode = () => {
-    setIsVisionMode(false);
-    isVisionModeRef.current = false; // Also update ref
-    // do not stop avatar; just remove overlay and release camera if it was owned by modal
-    if (visionCameraStream) {
-      visionCameraStream.getTracks().forEach(t => t.stop());
-      setVisionCameraStream(null);
-      visionCameraStreamRef.current = null; // Also update ref
-    }
-    // Reset to default rear-facing camera when exiting
-    setCameraFacingMode('environment');
-  };
-
-
-  // Function to switch camera facing mode
-  const switchCamera = async () => {
-    const newFacingMode = cameraFacingMode === 'environment' ? 'user' : 'environment';
-    
-    // Stop current stream
-    if (visionCameraStream) {
-      visionCameraStream.getTracks().forEach(t => t.stop());
-    }
-
-    try {
-      // Get new stream with the opposite facing mode
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode }
-      });
-      setVisionCameraStream(stream);
-      visionCameraStreamRef.current = stream; // Also update ref
-      setCameraFacingMode(newFacingMode);
-    } catch (error) {
-      console.error('Error switching camera:', error);
-      toast({
-        variant: "destructive",
-        title: "Camera Error",
-        description: "Could not switch camera. Please check permissions.",
-      });
-    }
-  };
-
-  // Control avatar sizing - always full screen
-  useEffect(() => {
-    setIsAvatarFullScreen(true);
-  }, []);
-
-  // Set up vision camera video when stream is available
-  useEffect(() => {
-    if (visionCameraStream && visionVideoRef.current) {
-      visionVideoRef.current.srcObject = visionCameraStream;
-      visionCameraStreamRef.current = visionCameraStream; // Also update ref
-    }
-  }, [visionCameraStream]);
-
+  // Ref to store sessionId for immediate access in voice detection
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionTokenRef = useRef<string | null>(null);
+  const sessionInfoRef = useRef<SessionInfo | null>(null);
 
   const [startAvatarLoading, setStartAvatarLoading] = useState<boolean>(false);
-  const [isAvatarRunning, setIsAvatarRunning] = useState<boolean>(false);
-  const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
-  let timeout: any;
-
-
-  const apiKey: any = import.meta.env.VITE_XAI_API_KEY;
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: "https://api.x.ai/v1",
-    dangerouslyAllowBrowser: true,
+  const [isSessionStarted, setIsSessionStarted] = useState<boolean>(false);
+  const [loadingProgress, setLoadingProgress] = useState<number>(0);
+  
+  // Camera states
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [isAvatarSpeaking, setIsAvatarSpeaking] = useState<boolean>(false);
+  const [isUserTalking, setIsUserTalking] = useState<boolean>(false);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  
+  // Ref to track actual speaking state to prevent race conditions
+  const isAvatarSpeakingRef = useRef<boolean>(false);
+  const speakingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioDetectionRef = useRef<boolean>(false);
+  
+  // Ref to track current camera state for voice detection
+  const cameraStateRef = useRef<boolean>(false);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  
+  // Pre-warm avatar for faster response
+  const preWarmAvatar = useRef<boolean>(false);
+  const smallAvatarRef = useRef<HTMLVideoElement>(null);
+  const analysisIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const analysisQueueRef = useRef<string[]>([]);
+  const isProcessingQueueRef = useRef<boolean>(false);
+  
+  // Response cache for faster repeated queries
+  const responseCache = useRef<Map<string, string>>(new Map());
+  
+  // Media analysis state
+  const [currentMediaAnalysis, setCurrentMediaAnalysis] = useState<string>('');
+  const [hasMediaContext, setHasMediaContext] = useState<boolean>(false);
+  const [mediaFileName, setMediaFileName] = useState<string>('');
+  
+  // Drag and drop state
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
+  
+  // Persistent media context using refs to survive re-renders
+  const mediaContextRef = useRef<{
+    analysis: string;
+    fileName: string;
+    hasContext: boolean;
+  }>({
+    analysis: '',
+    fileName: '',
+    hasContext: false
   });
+  
+  // Audio context and gain node for volume control
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const [volumeLevel] = useState<number>(2.0); // Default to 2x volume boost
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
 
-
-  // Function to handle speech recognition
-  const handleStartListening = async () => {
-    console.log('handleStartListening called', { speechService: !!speechService.current, isListening, isAiProcessing });
-    if (speechService.current && !isListening && !isAiProcessing) {
+  // Function to detect when avatar actually stops speaking
+  const detectAvatarAudioStop = () => {
+    if (!mediaStream.current || !isAvatarSpeakingRef.current) return;
+    
+    console.log('🎭 Starting audio detection for avatar speech');
+    audioDetectionRef.current = true;
+    
+    const checkAudioLevel = () => {
+      if (!audioDetectionRef.current || !isAvatarSpeakingRef.current) return;
+      
       try {
-        console.log('Starting speech recognition...');
-        await speechService.current.startListening();
-        setIsListening(true);
-        console.log('Speech recognition started successfully');
+        // Get the video element that contains the avatar audio
+        const video = mediaStream.current;
+        if (video) {
+          // Check multiple conditions to determine if avatar stopped speaking
+          const isPlaying = !video.paused && !video.ended && video.readyState > 2;
+          const isMuted = video.muted;
+          const volume = video.volume;
+          
+          console.log('🎭 Audio detection check:', {
+            isPlaying,
+            isMuted,
+            volume,
+            readyState: video.readyState,
+            paused: video.paused,
+            ended: video.ended
+          });
+          
+          // Avatar stopped speaking if:
+          // 1. Video is not playing, OR
+          // 2. Video is muted, OR  
+          // 3. Volume is 0, OR
+          // 4. Video has ended
+          if (!isPlaying || isMuted || volume === 0 || video.ended) {
+            console.log('🎭 Audio detection: Avatar stopped speaking', {
+              reason: !isPlaying ? 'video not playing' : 
+                      isMuted ? 'video muted' : 
+                      volume === 0 ? 'volume is 0' : 'video ended'
+            });
+            audioDetectionRef.current = false;
+            isAvatarSpeakingRef.current = false;
+            setIsAvatarSpeaking(false);
+            emitEvent('AVATAR_STOP_TALKING');
+            return;
+          }
+        }
+        
+        // Continue checking every 500ms
+        setTimeout(checkAudioLevel, 500);
       } catch (error) {
-        console.error('Error starting speech recognition:', error);
-        setIsListening(false);
+        console.error('🎭 Audio detection error:', error);
+        // Fallback to timer-based approach
+        audioDetectionRef.current = false;
+        console.log('🎭 Audio detection failed, falling back to timer-based approach');
       }
-    } else {
-      console.log('Cannot start speech recognition:', {
-        hasService: !!speechService.current,
-        isListening,
-        isAiProcessing
-      });
-    }
+    };
+    
+    // Start checking after a short delay
+    setTimeout(checkAudioLevel, 1000);
   };
 
+  // Function to manually reset avatar speaking state (for debugging and recovery)
+  const resetAvatarSpeakingState = () => {
+    console.log('🎭 Manually resetting avatar speaking state');
+    audioDetectionRef.current = false;
+    if (speakingTimerRef.current) {
+      clearTimeout(speakingTimerRef.current);
+      speakingTimerRef.current = null;
+    }
+    isAvatarSpeakingRef.current = false;
+    setIsAvatarSpeaking(false);
+    emitEvent('AVATAR_STOP_TALKING');
+  };
 
-  // Function to handle speech recognition results
-  const handleSpeechResult = async (transcript: string) => {
-    console.log('Speech result received:', transcript);
-    
-    // CRITICAL: Prevent duplicate processing if we're already processing a speech result
-    // This prevents multiple API calls when multiple speech recognition results arrive quickly
-    if (isProcessingSpeechRef.current || isAiProcessing) {
-      console.log('⚠️ Skipping speech result - already processing another speech result');
+  // Avatar control methods
+  const startAvatarSpeaking = async (text: string) => {
+    if (!sessionTokenRef.current || !sessionIdRef.current) {
+      console.log('🎭 Cannot start avatar speech - missing requirements:', {
+        hasSessionToken: !!sessionTokenRef.current,
+        hasSessionId: !!sessionIdRef.current,
+        sessionId: sessionIdRef.current
+      });
       return;
     }
     
-    // CRITICAL: Set processing flag immediately (synchronously) to prevent duplicate calls
-    isProcessingSpeechRef.current = true;
-    
-    // CRITICAL: If avatar is still speaking, interrupt it first before processing
-    if (isAvatarSpeakingRef.current) {
-      console.log('⚠️ Avatar still speaking when user speech received - forcing interrupt...');
-      try {
-        // Use sessionId from ref (always current), fallback to ref data, then state
-        const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-        if (avatar.current && currentSessionId) {
-          console.log('📞 Force interrupting avatar with sessionId:', currentSessionId);
-          // Set cancellation flag and clear state immediately
-          shouldCancelSpeechRef.current = true;
-          setAvatarSpeech('');
-          isAvatarSpeakingRef.current = false;
-          
-          // Call interrupt API
-          await avatar.current.interrupt({
-            interruptRequest: {
-              sessionId: currentSessionId
-            }
-          });
-          console.log('✅ Avatar force interrupted successfully');
-        } else {
-          console.warn('⚠️ Cannot force interrupt - missing sessionId', {
-            hasAvatar: !!avatar.current,
-            sessionIdFromRef: sessionIdRef.current,
-            sessionIdFromDataRef: dataRef.current?.sessionId,
-            sessionIdFromState: sessionId
-          });
-          // Even without sessionId, clear the state
-          setAvatarSpeech('');
-          isAvatarSpeakingRef.current = false;
-        }
-      } catch (err) {
-        console.error('Interrupt failed:', err);
-        // Even if interrupt fails, clear the state
-        setAvatarSpeech('');
-        isAvatarSpeakingRef.current = false;
-      }
-    }
-    
     try {
-      // Mark that user has started chatting - this means initial greeting is done
-      setHasUserStartedChatting(true);
-      // Clear initial greeting flag since user has started interacting
-      isInitialGreetingRef.current = false;
-
-      // Add user message to chat
-      const updatedMessages = [...chatMessages, { role: 'user', message: transcript }];
-      setChatMessages(updatedMessages);
-
-      // Set loading state
-      setIsAiProcessing(true);
-
-      // CRITICAL: Camera mode takes priority - when active, always capture and include current frame
-      // 1. Check if camera vision mode is explicitly active (isVisionMode state) - HIGHEST PRIORITY
-      // 2. Check if user is asking about uploaded media (has latestMediaKey and analysis ready)
-      // These can work together - camera frame can be included even when asking about uploaded media
-
-      // Priority 1: If camera vision mode is explicitly active, ALWAYS capture and include current frame
-      // This ensures that whenever the user asks something in camera mode, the current frame is included
-      // CRITICAL: Use ref to get latest value (state might be stale in closure)
-      // Also check if camera stream/video is actually active as a fallback
-      const currentIsVisionMode = isVisionModeRef.current || isVisionMode;
-      const currentVisionCameraStream = visionCameraStreamRef.current || visionCameraStream;
-      const hasActiveCameraStream = currentVisionCameraStream && 
-        currentVisionCameraStream.getTracks().some(track => track.readyState === 'live');
-      const hasActiveVideo = visionVideoRef.current && 
-        visionVideoRef.current.videoWidth > 0 && 
-        visionVideoRef.current.videoHeight > 0;
+      console.log('🎭 Starting avatar speech:', text);
+      console.log('🎭 Using session ID:', sessionIdRef.current);
       
-      // Check if camera mode is active (either by state or by active camera stream)
-      if (currentIsVisionMode || (hasActiveCameraStream && hasActiveVideo)) {
-        console.log('📸 Camera mode detected:', {
-          isVisionMode: currentIsVisionMode,
-          hasActiveCameraStream,
-          hasActiveVideo,
-          videoWidth: visionVideoRef.current?.videoWidth,
-          videoHeight: visionVideoRef.current?.videoHeight
-        });
-        // Wait a bit for video to be ready if dimensions are not available yet
-        let retryCount = 0;
-        const maxRetries = 10;
-        let hasActiveCameraView = visionVideoRef.current && 
-          visionVideoRef.current.videoWidth > 0 && 
-          visionVideoRef.current.videoHeight > 0;
-        
-        // If camera view not ready, wait a bit and retry
-        while (!hasActiveCameraView && retryCount < maxRetries && visionVideoRef.current) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          hasActiveCameraView = visionVideoRef.current && 
-            visionVideoRef.current.videoWidth > 0 && 
-            visionVideoRef.current.videoHeight > 0;
-          retryCount++;
-        }
-        
-        if (hasActiveCameraView && visionVideoRef.current) {
-          console.log('📸 Camera vision mode active - capturing current frame for AI response');
-          const currentFrameDataUrl = captureVisionFrameDataUrl();
-          console.log('📸 Frame capture result:', currentFrameDataUrl ? 'SUCCESS' : 'FAILED');
-          
-          if (currentFrameDataUrl) {
-            // Build conversation history for vision
-            const conversationHistory = updatedMessages.map(msg => ({
-              role: msg.role as 'user' | 'assistant',
-              content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-            }));
-
-            const messagesForVision = [
-              {
-                role: 'system' as const,
-                content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-VISION ANALYSIS:
-- When analyzing images/videos, make hilarious observations about what you see
-- Point out funny details, absurd situations, or comedic elements
-- Use your vision analysis to crack jokes while being genuinely helpful
-- Reference previous images/videos in the conversation for running gags
-- Answer questions based on what you can see in the current camera frame
-- The user is in camera mode, so you are seeing a live view from their camera
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-- Answer questions based on what you see in the camera view
-- Since you're in camera mode, reference what you see in the current frame
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-              },
-              ...conversationHistory.slice(0, -1), // All previous messages except the last (user's current question)
-              {
-                role: 'user' as const,
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: transcript
-                  },
-                  {
-                    type: 'image_url' as const,
-                    image_url: { url: currentFrameDataUrl, detail: 'high' as const }
-                  }
-                ]
-              }
-            ];
-
-            const aiResponse = await openai.chat.completions.create({
-              model: 'grok-2-vision',
-              messages: messagesForVision,
-              temperature: 0.8,
-              max_tokens: 400
-            } as any);
-
-            const aiMessage = aiResponse.choices[0].message.content || '';
-            // Add AI response to chat
-            setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-            
-            // CRITICAL: Suspend speech recognition BEFORE setting avatar speech
-            speechService.current?.suspend(aiMessage);
-            
-            // CRITICAL: Clear loading state FIRST, then set avatar speech
-            setIsAiProcessing(false);
-            
-            if (!isAvatarSpeakingRef.current) {
-              setAvatarSpeech(aiMessage);
-            } else {
-              setTimeout(() => {
-                if (!isAvatarSpeakingRef.current) {
-                  setAvatarSpeech(aiMessage);
-                } else {
-                  isAvatarSpeakingRef.current = false;
-                  setAvatarSpeech(aiMessage);
-                }
-              }, 300);
-            }
-            return;
-          } else {
-            console.error('⚠️ Could not capture camera frame in vision mode');
-            toast({
-              variant: "destructive",
-              title: "Camera Error",
-              description: "Could not capture camera frame. Please ensure the camera is active and try again.",
-            });
-            setIsAiProcessing(false);
-            return;
-          }
-        } else {
-          // Camera mode is active but video not ready
-          console.error('⚠️ Camera mode active but video not ready');
-          toast({
-            variant: "destructive",
-            title: "Camera Not Ready",
-            description: "Camera is not ready yet. Please wait a moment and try again.",
-          });
-          setIsAiProcessing(false);
-          return;
-        }
+      // Set speaking state immediately when speech starts
+      isAvatarSpeakingRef.current = true;
+      setIsAvatarSpeaking(true);
+      console.log('🎭 Avatar speaking state set to true immediately');
+      
+      // Restore audio if it was muted
+      if (mediaStream.current) {
+        mediaStream.current.muted = false;
+        mediaStream.current.volume = 1.0;
+        console.log('🎭 Avatar audio restored');
       }
-
-      // Priority 2: If asking about uploaded media, use media context
-      // This ensures uploaded media questions are answered from stored analysis
-      // CRITICAL: Use refs to get latest values (state might be stale in closure)
-      const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
-      const currentMediaAnalyses = mediaAnalysesRef.current;
-      const hasUploadedMedia = currentLatestMediaKey && currentMediaAnalyses[currentLatestMediaKey]?.status === 'ready';
-      // Improved pattern matching to catch various ways of asking about images/videos
-      const isAskingAboutUploadedMedia = hasUploadedMedia && (
-        // Pattern 1: "tell me about [image/photo/picture]" or "tell me about the [image/photo]"
-        /tell\s+(me\s+)?(about\s+)?(the\s+)?(image|photo|picture|pic|uploaded|file|video|media)/i.test(transcript)
-        // Pattern 2: "describe [image/photo]" or "what's in [image/photo]"
-        || /\b(describe|what\s+is\s+in|what's\s+in|what\s+is\s+on|explain|what\s+can\s+you\s+see)\b.*\b(image|photo|picture|pic|uploaded|file|video|media)\b/i.test(transcript)
-        // Pattern 3: "describe about the image" or "what about the image"
-        || /(describe|what|tell|talk|say)\s+(about|of)\s+(the\s+)?(image|photo|picture|pic|file|video)/i.test(transcript)
-        // Pattern 4: "what [image/photo]" or "what about [image/photo]"
-        || /what\s+(about\s+)?(the\s+)?(image|photo|picture|pic|file|video)/i.test(transcript)
-        // Pattern 5: Direct references like "the image", "the photo" when context suggests it's about uploaded media
-        || /(the\s+)?(image|photo|picture|pic|file|video)\s+(is|shows|has|contains|depicts)/i.test(transcript)
+      
+      // Start the speech using API
+      const speakPromise = sendTextToAvatar(
+        sessionTokenRef.current,
+        sessionIdRef.current,
+        text,
+        'repeat'
       );
-
-      console.log('🔍 Checking workflow:', { 
-        isVisionMode: currentIsVisionMode,
-        isVisionModeFromState: isVisionMode,
-        isVisionModeFromRef: isVisionModeRef.current,
-        hasActiveCameraStream,
-        hasActiveVideo,
-        hasUploadedMedia,
-        isAskingAboutUploadedMedia,
-        latestMediaKey: currentLatestMediaKey,
-        latestMediaKeyFromState: latestMediaKey,
-        latestMediaKeyFromRef: latestMediaKeyRef.current,
-        mediaAnalysesKeys: Object.keys(currentMediaAnalyses),
-        transcript 
-      });
-
-      // Priority 2: If asking about uploaded media, use media context
-      // This ensures uploaded media questions are always answered from stored analysis
-      if (isAskingAboutUploadedMedia) {
-        console.log('📎 Using uploaded media context for question');
-        const latest = getLatestMediaMessage();
-        const mediaInfo = latest && (latest as any).media as { file: File; type: 'photo' | 'video' } | undefined;
-        const fileName = mediaInfo?.file?.name || 'the uploaded file';
-        const analysis = currentLatestMediaKey ? currentMediaAnalyses[currentLatestMediaKey] : undefined;
-
-        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) {
-          const waitMsg = `I'm still analyzing "${fileName}". Please wait a moment.`;
-          setChatMessages(prev => [...prev, { role: 'assistant', message: waitMsg }]);
-          setAvatarSpeech(waitMsg);
-          setIsAiProcessing(false);
-          return;
-        }
-
-        // Use stored analysis to answer
-        const conversationHistory = updatedMessages.map(msg => ({
-          role: msg.role as 'user' | 'assistant',
-          content: (msg as any).media ? `${msg.message} [${(msg as any).media.type.toUpperCase()}: ${(msg as any).media.file.name}]` : msg.message
-        }));
-
-        const messagesForAnswer = [
-          {
-            role: 'system' as const,
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-          },
-          {
-            role: 'system' as const,
-            content: `CRITICAL CONTEXT: The user has uploaded a ${analysis.type} file named "${analysis.fileName}" which has been fully analyzed.
-
-ANALYSIS OF THE UPLOADED ${analysis.type.toUpperCase()}:
-${analysis.analysisText}
-
-INSTRUCTIONS:
-- The user is asking about this uploaded ${analysis.type} file
-- Base your answer ENTIRELY on the analysis provided above
-- Reference specific details from the analysis in your response
-- When the user says "the image", "the photo", "the picture", "the file", or "the video", they are referring to this uploaded file: "${analysis.fileName}"
-- Be helpful and funny while answering their question about "${analysis.fileName}"
-- DO NOT give generic responses - use the analysis content to provide specific, detailed answers`
-          },
-          ...conversationHistory,
-          { role: 'user' as const, content: transcript }
-        ];
-
-        const aiResponse = await openai.chat.completions.create({
-          model: 'grok-2-latest',
-          messages: messagesForAnswer,
-          temperature: 0.8,
-          max_tokens: 400
-        });
-
-        const aiMessage = aiResponse.choices[0].message.content || '';
-        setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
-        
-        // CRITICAL: Suspend speech recognition BEFORE setting avatar speech
-        speechService.current?.suspend(aiMessage);
-        
-        // CRITICAL: Clear loading state FIRST, then set avatar speech
-        setIsAiProcessing(false);
-        
-        if (!isAvatarSpeakingRef.current) {
-          setAvatarSpeech(aiMessage);
-        } else {
-          setTimeout(() => {
-            if (!isAvatarSpeakingRef.current) {
-              setAvatarSpeech(aiMessage);
-            } else {
-              isAvatarSpeakingRef.current = false;
-              setAvatarSpeech(aiMessage);
-            }
-          }, 300);
-        }
-        return;
+      
+      // Calculate minimum speaking duration based on text length
+      const wordsPerSecond = 1.5; // Much slower speaking speed for more realistic timing
+      const wordCount = text.split(' ').length;
+      const estimatedDuration = Math.max(20000, (wordCount / wordsPerSecond) * 1000); // At least 20 seconds
+      
+      console.log(`🎭 Estimated speaking duration: ${estimatedDuration}ms for ${wordCount} words`);
+      
+      // Clear any existing timer
+      if (speakingTimerRef.current) {
+        clearTimeout(speakingTimerRef.current);
       }
-
-
-      // Priority 3: Regular conversation - ALWAYS include media context if available
-      // This ensures the AI remembers uploaded media in ALL conversations, not just when explicitly asked
-      const mediaContextMessage = (() => {
-        // CRITICAL: Use refs to get latest values (state might be stale in closure)
-        const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
-        const currentMediaAnalyses = mediaAnalysesRef.current;
-        if (!currentLatestMediaKey) return null;
-        const analysis = currentMediaAnalyses[currentLatestMediaKey];
-        if (!analysis || analysis.status !== 'ready' || !analysis.analysisText) return null;
-        return {
-          role: 'system' as const,
-          content: `IMPORTANT: The user has uploaded a ${analysis.type} file named "${analysis.fileName}" which has been analyzed.
-
-ANALYSIS OF THE UPLOADED ${analysis.type.toUpperCase()}:
-${analysis.analysisText}
-
-REMEMBER:
-- When the user mentions "the image", "the photo", "the picture", "the file", "the video", or "the uploaded media", they are referring to this file: "${analysis.fileName}"
-- Always remember this context throughout the conversation
-- Reference this analysis when answering questions that might relate to the uploaded media
-- If the user asks about "the image" or "the photo" without being specific, they mean this uploaded file: "${analysis.fileName}"`
-        };
-      })();
-
-      const aiResponse = await openai.chat.completions.create({
-        model: 'grok-2-latest',
-        messages: [
-          {
-            role: 'system',
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-${(() => {
-          const currentLatestMediaKey = latestMediaKeyRef.current || latestMediaKey;
-          const currentMediaAnalyses = mediaAnalysesRef.current;
-          const hasMedia = currentLatestMediaKey && currentMediaAnalyses[currentLatestMediaKey]?.status === 'ready';
-          return hasMedia && currentLatestMediaKey ? `- IMPORTANT: The user has uploaded a ${currentMediaAnalyses[currentLatestMediaKey].type} file that has been analyzed. When they mention "the image", "the photo", "the picture", "the file", or "the video", they are referring to this uploaded file. Always keep this in mind when responding.` : '';
-        })()}
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-          },
-          // CRITICAL: ALWAYS inject media analysis context if available - this ensures the AI remembers uploaded media
-          // This is included in ALL requests, not just when explicitly asking about media
-          ...(mediaContextMessage ? [mediaContextMessage] : []),
-          ...updatedMessages.map(msg => {
-            if (msg.media) {
-              return {
-                role: msg.role as 'user' | 'assistant',
-                content: `${msg.message}\n\n[Media attached: ${msg.media.type} - ${msg.media.file.name}]`
-              };
-            }
-            return { role: msg.role as 'user' | 'assistant', content: msg.message };
-          })
-        ],
-        temperature: 0.8,
-        max_tokens: 400
+      
+      // Set up a timer that will disable speaking after the estimated duration (fallback)
+      speakingTimerRef.current = setTimeout(() => {
+        console.log('🎭 Avatar speaking timer expired - setting to false (fallback)');
+        isAvatarSpeakingRef.current = false;
+        setIsAvatarSpeaking(false);
+        speakingTimerRef.current = null;
+        audioDetectionRef.current = false;
+        emitEvent('AVATAR_STOP_TALKING');
+      }, estimatedDuration);
+      
+      // Start audio detection
+      detectAvatarAudioStop();
+      
+      // Handle speech completion - but don't immediately stop, let audio detection handle it
+      speakPromise.then(() => {
+        console.log('🎭 Avatar speech promise resolved - audio detection will handle actual stop');
+        // Don't set to false here - let audio detection handle it
+      }).catch((err: any) => {
+        console.error('Avatar speak error:', err);
+        if (speakingTimerRef.current) {
+          clearTimeout(speakingTimerRef.current);
+          speakingTimerRef.current = null;
+        }
+        audioDetectionRef.current = false;
+        isAvatarSpeakingRef.current = false;
+        setIsAvatarSpeaking(false);
+        emitEvent('AVATAR_STOP_TALKING');
       });
-
-      const aiMessage = aiResponse.choices[0].message.content || '';
-      // Add AI response to chat
-      setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
       
-      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend(aiMessage);
+      // Add a backup mechanism to ensure state is cleared even if audio detection fails
+      // This will run after the estimated duration + 5 seconds as a safety net
+      setTimeout(() => {
+        if (isAvatarSpeakingRef.current) {
+          console.log('🎭 Backup mechanism: Force clearing speaking state after timeout');
+          audioDetectionRef.current = false;
+          isAvatarSpeakingRef.current = false;
+          setIsAvatarSpeaking(false);
+          emitEvent('AVATAR_STOP_TALKING');
+        }
+      }, estimatedDuration + 5000); // 5 seconds after estimated duration
       
-      // CRITICAL: Clear loading state FIRST, then set avatar speech
-      // This ensures the speak useEffect can immediately process the avatar speech
-      setIsAiProcessing(false);
-      
-      // CRITICAL: After processing user speech and getting AI response, always set avatar speech
-      // The speak useEffect will handle ensuring the avatar is ready to speak
-      // If avatar was interrupted earlier, it should be ready now; if not, we'll wait briefly
-      if (!isAvatarSpeakingRef.current) {
-        // Avatar is not speaking - safe to start speaking the response immediately
-        setAvatarSpeech(aiMessage);
-      } else {
-        // Avatar might still be in the process of stopping after interruption
-        // Wait briefly for the interrupt to complete, then set speech
-        console.log('⚠️ Avatar might still be stopping, waiting briefly before speaking response...');
-        setTimeout(() => {
-          // Double-check and set speech - the speak useEffect will handle the rest
-          if (!isAvatarSpeakingRef.current) {
-            setAvatarSpeech(aiMessage);
-          } else {
-            // Force clear and set speech - user has spoken, avatar must respond
-            console.log('⚠️ Force clearing avatar speaking flag to allow response');
-            isAvatarSpeakingRef.current = false;
-            setAvatarSpeech(aiMessage);
-          }
-        }, 300);
-      }
-    } catch (error: any) {
-      console.error('Error processing speech result:', error);
-      setIsAiProcessing(false);
-      toast({
-        variant: "destructive",
-        title: "Uh oh! Something went wrong.",
-        description: error.message,
-      });
-    } finally {
-      // CRITICAL: Always clear processing flag, even if there was an error
-      isProcessingSpeechRef.current = false;
+      return speakPromise;
+    } catch (err: any) {
+      console.error('Avatar speak setup error:', err);
+      isAvatarSpeakingRef.current = false;
+      setIsAvatarSpeaking(false);
+      emitEvent('AVATAR_STOP_TALKING');
     }
   };
 
-  // Function to handle speech recognition errors
-  const handleSpeechError = (error: string) => {
-    console.error('Speech recognition error:', error);
-    toast({
-      variant: "destructive",
-      title: "Speech Recognition Error",
-      description: error,
+  // const stopAvatarSpeaking = async () => {
+  //   if (isAvatarSpeakingRef.current) {
+  //     console.log('🎭 Manually stopping avatar speech');
+      
+  //     try {
+  //       // Use the proper HeyGen API method to stop avatar
+  //       if (avatar.current && typeof avatar.current.stopAvatar === 'function' && sessionIdRef.current) {
+  //         await avatar.current.stopAvatar({ 
+  //           stopSessionRequest: { 
+  //             sessionId: sessionIdRef.current 
+  //           } 
+  //         });
+  //         console.log('🎭 Called avatar.stopAvatar() - avatar should stop speaking');
+  //       } else {
+  //         console.log('🎭 stopAvatar method not available or sessionId missing, using audio muting workaround');
+  //         // Fallback to muting if method not available
+  //         if (mediaStream.current) {
+  //           mediaStream.current.muted = true;
+  //           mediaStream.current.volume = 0;
+  //           console.log('🎭 Avatar audio muted as workaround');
+  //         }
+  //       }
+  //     } catch (error) {
+  //       console.error('🎭 Error stopping avatar:', error);
+  //       // Fallback to muting if API call fails
+  //       if (mediaStream.current) {
+  //         mediaStream.current.muted = true;
+  //         mediaStream.current.volume = 0;
+  //         console.log('🎭 Avatar audio muted as fallback');
+  //       }
+  //     }
+      
+  //     // Stop audio detection
+  //     audioDetectionRef.current = false;
+      
+  //     // Clear timer and update state
+  //     if (speakingTimerRef.current) {
+  //       clearTimeout(speakingTimerRef.current);
+  //       speakingTimerRef.current = null;
+  //     }
+  //     isAvatarSpeakingRef.current = false;
+  //     setIsAvatarSpeaking(false);
+  //     emitEvent('AVATAR_STOP_TALKING');
+  //   }
+  // };
+
+  const interruptAvatarSpeaking = async () => {
+    console.log('🎭 interruptAvatarSpeaking called:', {
+      isAvatarSpeakingRef: isAvatarSpeakingRef.current,
+      isAvatarSpeaking,
+      hasSessionId: !!sessionIdRef.current
     });
-    setIsListening(false);
-  };
-
-  // Function to handle file uploads
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (files) {
-      // Mark that user has started chatting
-      setHasUserStartedChatting(true);
-
-      const newFiles = Array.from(files);
-
-      // Process each file and add to chat immediately
-      newFiles.forEach(file => {
-        // Detect file type more accurately
-        // Check MIME type first, then fall back to extension
-        let fileType: 'photo' | 'video' | null = null;
-        if (file.type.startsWith('image/')) {
-          fileType = 'photo';
-        } else if (file.type.startsWith('video/')) {
-          fileType = 'video';
+    
+    if (isAvatarSpeakingRef.current) {
+      console.log('🎭 Interrupting avatar speech', {
+        hasSessionId: !!sessionIdRef.current,
+        sessionId: sessionIdRef.current
+      });
+      
+      try {
+        // Use the HeyGen API to stop the streaming session
+        if (sessionIdRef.current && sessionTokenRef.current) {
+          await stopStreamingSession(sessionTokenRef.current, sessionIdRef.current);
+          console.log('🎭 Called stopStreamingSession() - avatar should stop speaking');
         } else {
-          // Fallback: check file extension
-          const fileName = file.name.toLowerCase();
-          const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
-          const videoExtensions = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
+          console.log('🎭 Interrupt/stopAvatar methods not available or sessionId missing, using audio muting workaround');
+          // Fallback to muting if methods not available
+          if (mediaStream.current) {
+            mediaStream.current.muted = true;
+            mediaStream.current.volume = 0;
+            console.log('🎭 Avatar audio muted as workaround');
+          }
           
-          if (imageExtensions.some(ext => fileName.endsWith(ext))) {
-            fileType = 'photo';
-          } else if (videoExtensions.some(ext => fileName.endsWith(ext))) {
-            fileType = 'video';
+          // Stop audio detection and clear state for fallback case
+          audioDetectionRef.current = false;
+          if (speakingTimerRef.current) {
+            clearTimeout(speakingTimerRef.current);
+            speakingTimerRef.current = null;
           }
+          isAvatarSpeakingRef.current = false;
+          setIsAvatarSpeaking(false);
+          emitEvent('AVATAR_STOP_TALKING');
         }
-
-        if (fileType) {
-          const mediaKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
-          // Track latest media for future context
-          setLatestMediaKey(mediaKey);
-          latestMediaKeyRef.current = mediaKey; // Also update ref
-          // Initialize background analysis entry
-          setMediaAnalyses(prev => {
-            const updated = {
-              ...prev,
-              [mediaKey]: {
-                type: fileType,
-                fileName: file.name,
-                status: 'processing' as const
-              }
-            };
-            mediaAnalysesRef.current = updated; // Also update ref
-            return updated;
-          });
-          // Add media message to chat immediately
-          const mediaMessage: ChatMessageType = {
-            role: 'user',
-            message: `I uploaded a ${fileType}`,
-            media: { file, type: fileType },
-            mediaKey
-          };
-          setChatMessages(prev => [...prev, mediaMessage]);
-
-          // Analyze in background (no immediate reply)
-          void processMediaWithAI(file, fileType, mediaKey);
+      } catch (error) {
+        console.error('🎭 Error interrupting avatar:', error);
+        // Fallback to muting if API call fails
+        if (mediaStream.current) {
+          mediaStream.current.muted = true;
+          mediaStream.current.volume = 0;
+          console.log('🎭 Avatar audio muted as fallback');
         }
-      });
+        
+        // Stop audio detection and clear state for error case
+        audioDetectionRef.current = false;
+        if (speakingTimerRef.current) {
+          clearTimeout(speakingTimerRef.current);
+          speakingTimerRef.current = null;
+        }
+        isAvatarSpeakingRef.current = false;
+        setIsAvatarSpeaking(false);
+        emitEvent('AVATAR_STOP_TALKING');
+      }
+      
+      // Only do state cleanup if we haven't already done it in fallback/error cases
+      if (isAvatarSpeakingRef.current) {
+        // Use the centralized reset function for consistency
+        resetAvatarSpeakingState();
+      }
+    }
+  };
 
-      // Clear the input
-      event.target.value = '';
+  // Event system for avatar and user talking states
+  const emitEvent = (eventType: string, data?: any) => {
+    console.log(`🎭 Event: ${eventType}`, data);
+    
+    switch (eventType) {
+      case 'USER_START':
+        console.log('🎭 USER_START event triggered:', {
+          isAvatarSpeaking: isAvatarSpeakingRef.current,
+          isUserTalking,
+          data
+        });
+        setIsUserTalking(true);
+        // Interrupt avatar if it's speaking
+        if (isAvatarSpeakingRef.current) {
+          console.log('🎭 USER_START: Interrupting avatar to let user speak');
+          interruptAvatarSpeaking();
+        } else {
+          console.log('🎭 USER_START: Avatar not speaking, no interruption needed');
+        }
+        break;
+        
+      case 'AVATAR_STOP_TALKING':
+        console.log('🎭 AVATAR_STOP_TALKING: Avatar finished speaking');
+        // Don't set state here as it's already handled in the promise handlers
+        break;
+        
+      case 'USER_STOP':
+        setIsUserTalking(false);
+        console.log('🎭 USER_STOP: User finished speaking');
+        break;
+    }
+  };
+  
+  let timeout: any;
 
-      toast({
-        title: "Upload received",
-        description: `${newFiles.length} file(s) queued for analysis`,
-      });
-
-      // Inform user that analysis is underway
-      const analyzingText = newFiles.length === 1
-        ? `I'm analyzing right now. Please wait until Analysis is finished  ...`
-        : `I'm analyzing your files now. Please wait until Analysis is finished...`;
-      setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
-      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend(analyzingText);
-      setAvatarSpeech(analyzingText);
+  // Function to set up audio context with gain control for volume boost
+  const setupAudioContext = () => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext)();
+      gainNodeRef.current = audioContextRef.current.createGain();
+      gainNodeRef.current.gain.value = volumeLevel;
+      gainNodeRef.current.connect(audioContextRef.current.destination);
     }
   };
 
 
-  // Function to convert file to data URL
-  const fileToDataUrl = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = error => reject(error);
+  // Pre-warm avatar for faster response
+  const preWarmAvatarForResponse = async () => {
+    if (sessionIdRef.current && !preWarmAvatar.current) {
+      try {
+        // Send a minimal test message to warm up the avatar
+        // await avatar.current.speak({ 
+        //   taskRequest: { 
+        //     text: "Ready", 
+        //     sessionId: sessionIdRef.current! 
+        //   } 
+        // });
+        preWarmAvatar.current = true;
+        console.log('🔥 Avatar pre-warmed for faster responses');
+      } catch (error) {
+        console.log('Pre-warm failed, will use normal flow:', error);
+      }
+    }
+  };
+
+  // Function to process analysis queue with reduced latency
+  const processAnalysisQueue = async () => {
+    console.log('🎭 Processing queue - current state:', {
+      isProcessing: isProcessingQueueRef.current,
+      queueLength: analysisQueueRef.current.length,
+      hasSessionId: !!sessionIdRef.current,
+      sessionId: sessionIdRef.current,
+      isAvatarSpeaking: isAvatarSpeakingRef.current
     });
-  };
-
-  // NOTE: Video frame capture helper removed; current flow answers video questions from stored analysis.
-
-  // Helper to find the most relevant recent media message
-  const getLatestMediaMessage = (): ChatMessageType | null => {
-    // Prefer exact mediaKey match
-    if (latestMediaKey) {
-      const exact = [...chatMessages].reverse().find(m => (m as any).mediaKey === latestMediaKey && (m as any).media);
-      if (exact) return exact as any;
+    
+    if (isProcessingQueueRef.current || analysisQueueRef.current.length === 0) {
+      console.log('🎭 Queue processing skipped:', {
+        isProcessing: isProcessingQueueRef.current,
+        queueLength: analysisQueueRef.current.length
+      });
+      return;
     }
-    // Fallback: last message that has media
-    const anyMedia = [...chatMessages].reverse().find(m => (m as any).media);
-    return anyMedia || null;
+    
+    isProcessingQueueRef.current = true;
+    const analysis = analysisQueueRef.current.shift();
+    
+    console.log('🎭 Processing analysis item:', analysis);
+    
+    if (analysis && sessionIdRef.current) {
+      try {
+        // Use the new control method
+        console.log('🎭 Starting avatar speech for analysis...');
+        await startAvatarSpeaking(analysis);
+        
+        // Wait for speech to complete before processing next item
+        setTimeout(() => {
+          console.log('🎭 Analysis speech completed, checking for more items...');
+          isProcessingQueueRef.current = false;
+          // Process next item immediately if available
+          if (analysisQueueRef.current.length > 0) {
+            console.log('🎭 More items in queue, processing next...');
+            processAnalysisQueue();
+          }
+        }, 2000); // Wait 2 seconds for speech to complete
+        
+      } catch (speakError) {
+        console.error('Error making avatar speak:', speakError);
+        isProcessingQueueRef.current = false;
+      }
+    } else {
+      console.log('🎭 Cannot process analysis - missing requirements:', {
+        hasAnalysis: !!analysis,
+        hasSessionId: !!sessionIdRef.current,
+        sessionId: sessionIdRef.current
+      });
+      isProcessingQueueRef.current = false;
+    }
   };
 
-  // Function to handle vision analysis from camera
 
-  // Receive live camera stream from CameraModal when vision starts
+  // Function to generate dynamic buttons based on conversation context
+  // const generateDynamicButtons = async (conversation: Array<{role: string, content: string}>) => {
+  //   try {
+  //     const response = await createApiCall(
+  //       () => openai.chat.completions.create({
+  //         model: 'gpt-3.5-turbo',
+  //         messages: [
+  //           {
+  //             role: 'system',
+  //             content: `Generate 4 witty button prompts (1-4 words each) based on conversation. Return only the 4 button texts, one per line.`
+  //           },
+  //           {
+  //             role: 'user',
+  //             content: `Context: ${conversation.slice(-2).map(msg => msg.content).join(' ')}` // Only use last 2 messages for faster processing
+  //           }
+  //         ],
+  //         max_tokens: 100, // Reduced for faster response
+  //         temperature: 0.7
+  //       }),
+  //     );
+      
+  //     const buttons = response.choices[0].message.content?.split('\n').filter(btn => btn.trim()) || [];
+  //     setDynamicButtons(buttons);
+  //   } catch (error) {
+  //     console.error('Error generating dynamic buttons:', error);
+  //     // Fallback to default buttons
+  //     setDynamicButtons([
+  //       "Mind-Bending Mysteries",
+  //       "Money Magic & Mayhem", 
+  //       "Love & Laughter Therapy",
+  //       "Life's Comedy Coach"
+  //     ]);
+  //   }
+  // };
 
-  // Function to process media with AI (background). Stores results instead of replying immediately
-  const processMediaWithAI = async (file: File, type: 'photo' | 'video', mediaKey: string) => {
+  const apiKey: any = import.meta.env.VITE_OPENAI_API_KEY;
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    dangerouslyAllowBrowser: true,
+    // Optimized configuration for better performance
+    timeout: 30000, // 30 second timeout for complex requests
+    maxRetries: 3, // More retries for reliability
+    // Add request timeout configuration
+    defaultHeaders: {
+      'User-Agent': 'AI-Assistant-App/1.0'
+    }
+  });
+
+
+  // Function to get current camera state dynamically
+  const getCurrentCameraState = () => {
+    // Access the current camera stream from the ref (always current)
+    const currentStream = cameraStreamRef.current;
+    return {
+      isActive: cameraStateRef.current,
+      stream: currentStream,
+      hasStream: !!currentStream,
+      streamTracks: currentStream?.getTracks().length || 0,
+      videoTracks: currentStream?.getVideoTracks().length || 0,
+      audioTracks: currentStream?.getAudioTracks().length || 0
+    };
+  };
+
+  // Function to get preferred microphone device (built-in on mobile)
+  const getPreferredMicrophone = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      
+      console.log('🎤 Available audio input devices:', audioInputs.map(d => ({
+        deviceId: d.deviceId,
+        label: d.label,
+        kind: d.kind
+      })));
+      
+      if (audioInputs.length === 0) {
+        console.log('🎤 No audio input devices found, using default');
+        return null;
+      }
+      
+      // Prefer built-in microphone on mobile devices
+      // Strategy:
+      // 1. Look for device with "builtin", "default", or "internal" in label (case insensitive)
+      // 2. Exclude devices with "headset", "headphone", or "bluetooth" in label
+      // 3. If we have multiple devices, prefer ones that don't look like headphones
+      
+      const excludeKeywords = ['headset', 'headphone', 'bluetooth', 'headphone', 'earphone'];
+      const preferKeywords = ['builtin', 'default', 'internal', 'built-in'];
+      
+      // First, try to find a device with preferred keywords
+      const preferredDevice = audioInputs.find(device => 
+        preferKeywords.some(keyword => device.label.toLowerCase().includes(keyword)) &&
+        !excludeKeywords.some(keyword => device.label.toLowerCase().includes(keyword))
+      );
+      
+      if (preferredDevice) {
+        console.log('🎤 Selected built-in microphone:', {
+          deviceId: preferredDevice.deviceId,
+          label: preferredDevice.label
+        });
+        return preferredDevice.deviceId;
+      }
+      
+      // Second, try to find a device that doesn't look like headphones
+      const nonHeadsetDevice = audioInputs.find(device =>
+        !excludeKeywords.some(keyword => device.label.toLowerCase().includes(keyword))
+      );
+      
+      if (nonHeadsetDevice) {
+        console.log('🎤 Selected non-headset microphone:', {
+          deviceId: nonHeadsetDevice.deviceId,
+          label: nonHeadsetDevice.label
+        });
+        return nonHeadsetDevice.deviceId;
+      }
+      
+      // Fallback: use the first available device
+      console.log('🎤 Using first available microphone:', {
+        deviceId: audioInputs[0].deviceId,
+        label: audioInputs[0].label
+      });
+      return audioInputs[0].deviceId;
+      
+    } catch (error) {
+      console.error('🎤 Error enumerating audio devices:', error);
+      return null;
+    }
+  };
+
+  // Function to start continuous listening for voice input
+  const startContinuousListening = () => {
+    // Try to use camera stream audio if available, otherwise get new audio stream
+    const getAudioStream = async () => {
+      const currentState = getCurrentCameraState();
+      if (currentState.stream && currentState.audioTracks > 0) {
+        console.log('🎤 Using camera stream audio for voice detection');
+        return currentState.stream;
+      } else {
+        console.log('🎤 Getting separate audio stream for voice detection');
+        // Get preferred microphone device for mobile devices
+        const deviceId = await getPreferredMicrophone();
+        const audioConstraints = deviceId ? { deviceId: { ideal: deviceId } } : true;
+        return await navigator.mediaDevices.getUserMedia({ 
+          audio: audioConstraints
+        });
+      }
+    };
+
+    getAudioStream()
+      .then((stream) => {
+        const audioContext = new (window.AudioContext)(); 
+        const mediaStreamSource = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        const bufferLength = analyser.fftSize;
+        const dataArray = new Uint8Array(bufferLength);
+      
+        mediaStreamSource.connect(analyser);
+
+        let isRecording = false;
+        let silenceStart: number | null = null;
+        const silenceTimeout = 1500; // 1.5 seconds of silence (increased for better reliability)
+        // Dynamic voice threshold based on camera state
+          const getVoiceThreshold = () => {
+            const currentCameraState = cameraStateRef.current;
+            const threshold = currentCameraState ? 20 : 30;
+            // console.log('🎤 Voice threshold check:', { currentCameraState, threshold });
+            return threshold;
+          };
+
+        const checkForVoice = () => {
+          analyser.getByteFrequencyData(dataArray);
+          const avgVolume = dataArray.reduce((a, b) => a + b) / bufferLength;
+
+          const currentThreshold = getVoiceThreshold();
+          
+          // Add more detailed logging for debugging
+          if (avgVolume > currentThreshold * 0.5) { // Log when approaching threshold
+            console.log('🎤 Voice activity detected:', {isCameraActive: cameraStateRef.current, avgVolume, threshold: currentThreshold, isRecording, cameraMode: cameraStateRef.current });
+          }
+
+          // Check if user is speaking (voice detected)
+          if (avgVolume > currentThreshold) {
+            // ALWAYS interrupt avatar if it's speaking, regardless of recording state
+            if (isAvatarSpeakingRef.current) {
+              console.log('🎤 User started speaking while avatar is talking - interrupting avatar!', { 
+                avgVolume, 
+                threshold: currentThreshold,
+                isAvatarSpeaking: isAvatarSpeakingRef.current,
+                isRecording,
+                hasSessionId: !!sessionIdRef.current,
+                sessionId: sessionIdRef.current
+              });
+              
+              // Emit USER_START event to interrupt avatar
+              emitEvent('USER_START', { avgVolume, threshold: currentThreshold });
+            }
+            
+            if (!isRecording) {
+              // Voice detected, start recording
+              console.log('🎤 Someone is trying to talk to me! Let me listen...', { 
+                avgVolume, 
+                threshold: currentThreshold,
+                hasMediaContext,
+                mediaFileName 
+              });
+              
+              // Emit USER_START event
+              emitEvent('USER_START', { avgVolume, threshold: currentThreshold });
+              
+              isRecording = true;
+              silenceStart = null;
+              
+              try {
+              mediaRecorder.current = new MediaRecorder(stream);
+              audioChunks.current = [];
+
+              mediaRecorder.current.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                  audioChunks.current.push(event.data);
+                  console.log('🎤 Audio chunk received:', event.data.size);
+                }
+              };
+
+              mediaRecorder.current.onstop = () => {
+                console.log('🎤 Recording stopped, processing audio...', { 
+                  chunksCount: audioChunks.current.length,
+                  totalSize: audioChunks.current.reduce((sum, chunk) => sum + chunk.size, 0)
+                });
+                
+                if (audioChunks.current.length > 0) {
+                  const audioBlob = new Blob(audioChunks.current, {
+                    type: 'audio/wav',
+                  });
+                  audioChunks.current = [];
+                  transcribeAudio(audioBlob);
+                } else {
+                  console.warn('🎤 No audio chunks recorded');
+                }
+                isRecording = false;
+              };
+
+              mediaRecorder.current.onerror = (error) => {
+                console.error('🎤 MediaRecorder error:', error);
+                isRecording = false;
+              };
+
+              mediaRecorder.current.start();
+              console.log('🎤 Recording started');
+            } catch (recorderError) {
+              console.error('🎤 Error creating MediaRecorder:', recorderError);
+              isRecording = false;
+            }
+          }
+          } else if (avgVolume < currentThreshold && isRecording) {
+            // Voice stopped, check for silence
+            if (!silenceStart) silenceStart = Date.now();
+
+            if (Date.now() - silenceStart >= silenceTimeout) {
+              console.log('🤫 Ah, the silence! Let me process what you said...', {
+                silenceDuration: Date.now() - silenceStart,
+                chunksCount: audioChunks.current.length
+              });
+              
+              // Emit USER_STOP event
+              emitEvent('USER_STOP', {
+                silenceDuration: Date.now() - silenceStart,
+                chunksCount: audioChunks.current.length
+              });
+              
+              if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
+                mediaRecorder.current.stop();
+              }
+              isRecording = false;
+              silenceStart = null;
+            }
+          } else if (avgVolume > currentThreshold && isRecording) {
+            // Still speaking, reset silence timer
+            silenceStart = null;
+            
+            // ALWAYS interrupt avatar if it's speaking while user continues talking
+            if (isAvatarSpeakingRef.current) {
+              console.log('🎤 User continues speaking while avatar is talking - interrupting avatar!', { 
+                avgVolume, 
+                threshold: currentThreshold,
+                isAvatarSpeaking: isAvatarSpeakingRef.current,
+                isRecording,
+                hasSessionId: !!sessionIdRef.current,
+                sessionId: sessionIdRef.current
+              });
+              
+              // Emit USER_START event to interrupt avatar
+              emitEvent('USER_START', { avgVolume, threshold: currentThreshold });
+            }
+          }
+
+          // Continue monitoring
+          requestAnimationFrame(checkForVoice);
+        };
+
+        checkForVoice();
+      })
+      .catch((error) => {
+        console.error('Error accessing microphone:', error);
+        // If we can't get audio stream, don't affect camera state
+        console.log('🎤 Voice detection failed, but camera should remain active');
+      });
+  };
+
+
+  // Drag and drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      handleFileUpload(files[0]);
+    }
+  };
+
+  // Function to clear media context
+  const clearMediaContext = () => {
+    setCurrentMediaAnalysis('');
+    setHasMediaContext(false);
+    setMediaFileName('');
+    mediaContextRef.current = {
+      analysis: '',
+      fileName: '',
+      hasContext: false
+    };
+  };
+
+  // Function to handle file upload
+  const handleFileUpload = async (file: File) => {
     try {
       let aiResponse;
 
-      if (type === 'photo') {
-        // For images, use vision model
-        try {
-          const imageDataUrl = await fileToDataUrl(file);
-
-          // Build conversation history for vision
-          const conversationHistory = chatMessages.map(msg => ({
-            role: msg.role as 'user' | 'assistant',
-            content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-          }));
-
-          const messages = [
-            {
-              role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-VISION ANALYSIS:
-- When analyzing images/videos, make hilarious observations about what you see
-- Point out funny details, absurd situations, or comedic elements
-- Use your vision analysis to crack jokes while being genuinely helpful
-- Reference previous images/videos in the conversation for running gags
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-            },
-            ...conversationHistory,
-            {
-              role: 'user' as const,
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `I've shared an image named "${file.name}". Please analyze what you can see and provide helpful insights about the content.`
-                },
-                {
-                  type: 'image_url' as const,
-                  image_url: { url: imageDataUrl, detail: 'high' as const }
-                }
-              ]
+      if (file.type.startsWith('image/')) {
+        // Optimize image processing to reduce payload size
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+        
+        const base64 = await new Promise<string>((resolve) => {
+          img.onload = () => {
+            // Resize image to max 1024x1024 to reduce payload size
+            const maxSize = 1024;
+            let { width, height } = img;
+            
+            if (width > height) {
+              if (width > maxSize) {
+                height = (height * maxSize) / width;
+                width = maxSize;
+              }
+            } else {
+              if (height > maxSize) {
+                width = (width * maxSize) / height;
+                height = maxSize;
+              }
             }
-          ];
+            
+            canvas.width = width;
+            canvas.height = height;
+            ctx?.drawImage(img, 0, 0, width, height);
+            
+            // Convert to base64 with compression
+            const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+            resolve(base64Data);
+          };
+          img.src = URL.createObjectURL(file);
+        });
 
-          aiResponse = await openai.chat.completions.create({
-            model: 'grok-2-vision',
-            messages: messages,
-            temperature: 0.8,
-            max_tokens: 400
-          } as any);
-
-        } catch (visionError) {
-          console.warn('Vision analysis failed, falling back to text-only:', visionError);
-          // Fallback to text-only analysis
-          const conversationHistory = chatMessages.map(msg => ({
-            role: msg.role as 'user' | 'assistant',
-            content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-          }));
-
-          aiResponse = await openai.chat.completions.create({
-            model: 'grok-2-latest',
+        aiResponse = await createApiCall(
+          () => openai.chat.completions.create({
+            model: 'gpt-4o', // Use gpt-4o for better performance
             messages: [
               {
-                role: 'system' as const,
-                content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-              },
-              ...conversationHistory,
-              {
-                role: 'user' as const,
-                content: `I've shared an image file named "${file.name}" (${file.type}, ${Math.round(file.size / 1024)}KB). Since I cannot directly analyze the image content, could you please describe what's in the image or what you'd like help with? I'm here to assist with any questions or analysis you need.`
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: `Please analyze this image and provide a detailed description. What do you see in this image? Please be specific about objects, people, text, colors, and any other notable details.`
+                  },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:image/jpeg;base64,${base64}`
+                    }
+                  }
+                ]
               }
             ],
-            temperature: 0.8,
             max_tokens: 400
-          });
-        }
-      } else {
-        // For videos, use text-only model (no vision support for videos yet)
-        const conversationHistory = chatMessages.map(msg => ({
-          role: msg.role as 'user' | 'assistant',
-          content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
-        }));
+          }),
+          { timeout: 60000, retries: 2 }
+        );
 
-        aiResponse = await openai.chat.completions.create({
-          model: 'grok-2-latest',
-          messages: [
-            {
-              role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
-
-PERSONALITY TRAITS:
-- Crack jokes, puns, and witty observations constantly
-- Use self-deprecating humor and playful sarcasm
-- Make pop culture references and clever wordplay
-- Be genuinely helpful while being absolutely hilarious
-- React to images/videos with funny commentary
-- Remember EVERYTHING from the conversation (text, images, videos, vision data)
-- Build on previous jokes and references throughout the conversation
-
-CONVERSATION MEMORY:
-- Remember all previous messages, images, videos, and vision analysis
-- Reference past conversation elements in your responses
-- Build running jokes and callbacks
-- Acknowledge when you're seeing something new vs. referencing something old
-
-RESPONSE STYLE:
-- Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
-- Vary your humor style (puns, observational comedy, absurdist humor)
-- Keep responses helpful but entertaining
-- If someone shares media, react with humor while being genuinely helpful
-
-Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
-            },
-            ...conversationHistory,
-            {
-              role: 'user' as const,
-              content: `I've shared a video file named "${file.name}" (${file.type}, ${Math.round(file.size / 1024)}KB). Could you please describe what's in the video or what you'd like help with? I'm here to assist with any questions or analysis you need.`
+      } else if (file.type.startsWith('video/')) {
+        // Handle videos - extract frame for analysis with optimization
+        const video = document.createElement('video');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        const videoUrl = URL.createObjectURL(file);
+        video.src = videoUrl;
+        
+        // Wait for video to load and extract a frame
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Video loading timeout'));
+          }, 10000); // 10 second timeout for video processing
+          
+          video.onloadedmetadata = () => {
+            video.currentTime = 1; // Get frame at 1 second
+          };
+          video.onseeked = () => {
+            // Resize frame to reduce payload size
+            const maxSize = 1024;
+            let { videoWidth, videoHeight } = video;
+            
+            if (videoWidth > videoHeight) {
+              if (videoWidth > maxSize) {
+                videoHeight = (videoHeight * maxSize) / videoWidth;
+                videoWidth = maxSize;
+              }
+            } else {
+              if (videoHeight > maxSize) {
+                videoWidth = (videoWidth * maxSize) / videoHeight;
+                videoHeight = maxSize;
+              }
             }
-          ],
-          temperature: 0.8,
-          max_tokens: 400
+            
+            canvas.width = videoWidth;
+            canvas.height = videoHeight;
+            ctx?.drawImage(video, 0, 0, videoWidth, videoHeight);
+            clearTimeout(timeout);
+            resolve(null);
+          };
+          video.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error('Video loading failed'));
+          };
         });
-      }
-      const aiMessage = aiResponse.choices[0].message.content || '';
-      // Store analysis in background store
-      setMediaAnalyses(prev => {
-        const updated = {
-          ...prev,
-          [mediaKey]: {
-            type,
-            fileName: file.name,
-            status: 'ready' as const,
-            analysisText: aiMessage
-          }
-        };
-        mediaAnalysesRef.current = updated; // Also update ref
-        return updated;
-      });
 
-      // Notify user that analysis is complete for this item
-      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}" and I've got all the details locked and loaded. I'm ready to help you with whatever you need! What questions do you have about it?`;
-      setChatMessages(prev => [...prev, { role: 'assistant', message: doneText }]);
-      
-      // Wait a bit for any previous speech to finish, then set the completion message
-      // This ensures the avatar will speak the completion message even if it's currently speaking
-      setTimeout(() => {
-        // Check if avatar is still speaking; if so, interrupt to speak the completion message
-        if (isAvatarSpeakingRef.current && avatar.current) {
-          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-          if (currentSessionId) {
-            console.log('Interrupting current speech to deliver completion message');
-            // Reset speaking state immediately so new speech isn't blocked
-            shouldCancelSpeechRef.current = true;
-            isAvatarSpeakingRef.current = false;
-            // Interrupt current speech to make room for completion message
-            avatar.current.interrupt({
-              interruptRequest: { sessionId: currentSessionId }
-            }).catch(err => console.error('Interrupt error:', err));
-          }
+        // Convert canvas to base64 with compression
+        const frameBase64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+        
+        aiResponse = await createApiCall(
+          () => openai.chat.completions.create({
+            model: 'gpt-4o', // Use gpt-4o for better performance
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: `Please analyze this video frame from "${file.name}". Describe what you see in this frame, including any objects, people, text, activities, or notable details. This is a frame from a video file.`
+                  },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:image/jpeg;base64,${frameBase64}`
+                    }
+                  }
+                ]
+              }
+            ],
+            max_tokens: 400
+          }),
+          { timeout: 60000, retries: 2 }
+        );
+
+        URL.revokeObjectURL(videoUrl);
+
+      } else if (file.type.startsWith('text/')) {
+        // Handle text files with size limits
+        const fileContent = await file.text();
+        const maxTextLength = 50000; // 50KB text limit
+        
+        if (fileContent.length > maxTextLength) {
+          return;
         }
-        // Set the completion message after a short delay to ensure interrupt completes
-        setTimeout(() => {
-          console.log('Setting completion message:', doneText.substring(0, 50));
-          // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-          speechService.current?.suspend(doneText);
-          setAvatarSpeech(doneText);
-        }, 400);
-      }, 500);
+        
+        const prompt = `I've uploaded a text file: ${file.name}. Here's the content:\n\n${fileContent}\n\nPlease analyze this content and provide insights or help with it.`;
+        
+        aiResponse = await createApiCall(
+          () => openai.chat.completions.create({
+            model: 'gpt-4o', // Use gpt-4o for better performance
+            messages: [
+              { role: 'user', content: prompt }
+            ],
+            max_tokens: 400
+          }),
+          { timeout: 30000, retries: 2 }
+        );
+
+      } else {
+        // For other file types, provide basic analysis
+        const prompt = `I've uploaded a file: ${file.name} (${file.type}). Please help me understand what I can do with this file and provide any relevant guidance.`;
+        
+        aiResponse = await createApiCall(
+          () => openai.chat.completions.create({
+            model: 'gpt-4o', // Use gpt-4o for better performance
+            messages: [
+              { role: 'user', content: prompt }
+            ],
+            max_tokens: 400
+          }),
+          { timeout: 30000, retries: 2 }
+        );
+      }
+      
+      const analysisResult = aiResponse.choices[0].message.content || '';
+      
+      // Store the media analysis for future context
+      console.log('💾 Storing media analysis:', { analysisResult, fileName: file.name });
+      setCurrentMediaAnalysis(analysisResult);
+      setHasMediaContext(true);
+      setMediaFileName(file.name);
+      
+      // Also store in ref for persistence
+      mediaContextRef.current = {
+        analysis: analysisResult,
+        fileName: file.name,
+        hasContext: true
+      };
+      
+      // Verify state was set
+      setTimeout(() => {
+        console.log('🔍 State after setting:', { hasMediaContext, currentMediaAnalysis, mediaFileName });
+        console.log('🔍 Ref after setting:', mediaContextRef.current);
+      }, 100);
+      
+      
+      
+      // Make avatar ask what help the user needs in a natural, ChatGPT-like way
+      const fileType = file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'file';
+      const helpPrompts = [
+        `I just took a look at your ${fileType} "${file.name}" - this is really interesting! I'm genuinely curious about what you'd like to explore about it. What caught your attention?`,
+        `Your ${fileType} "${file.name}" caught my eye! I'd love to dive into whatever aspects interest you most. What would you like to know about it?`,
+        `I've been examining your ${fileType} "${file.name}" and I'm finding it quite engaging. What questions do you have? I'm excited to explore it with you.`,
+        `This ${fileType} "${file.name}" is fascinating! I'm genuinely curious - what drew you to this? What would you like to focus on?`,
+        `I just finished analyzing your ${fileType} "${file.name}" and wow, there's a lot to unpack here! What aspects are you most interested in discussing?`,
+        `Your ${fileType} "${file.name}" is really compelling! I'd love to hear your thoughts about it. What sparked your interest in this particular ${fileType}?`,
+        `I've been studying your ${fileType} "${file.name}" and I'm genuinely impressed. What would you like to explore together? I'm here to help you understand or discuss whatever interests you most.`
+      ];
+      
+      const randomHelpPrompt = helpPrompts[Math.floor(Math.random() * helpPrompts.length)];
+      setInput(randomHelpPrompt);
+
+      console.log("INPUT", input);
+      
     } catch (error: any) {
-      console.error('Error processing media with AI:', error);
-      setMediaAnalyses(prev => {
-        const updated = {
-          ...prev,
-          [mediaKey]: {
-            type,
-            fileName: file.name,
-            status: 'error' as const,
-            errorMessage: error?.message || 'Failed to analyze media'
-          }
-        };
-        mediaAnalysesRef.current = updated; // Also update ref
-        return updated;
-      });
-      toast({
-        variant: "destructive",
-        title: "Error processing media",
-        description: error.message,
-      });
+      console.error('Error processing file:', error);
     }
   };
 
+  // Function to transcribe the audio to text and then get the respective response of the given prompt
+  async function transcribeAudio(audioBlob: Blob) {
+    try {
+      console.log('🎤 Starting audio transcription...', { 
+        blobSize: audioBlob.size, 
+        hasMediaContext, 
+        mediaFileName 
+      });
+      
+      // Convert Blob to File
+      const audioFile = new File([audioBlob], 'recording.wav', {
+        type: 'audio/wav',
+      });
 
+      // Start transcription for faster processing with timeout
+      const transcriptionResponse = await createApiCall(
+        () => openai.audio.transcriptions.create({
+          model: 'whisper-1',
+          file: audioFile,
+          response_format: 'text'
+        }),
+        { timeout: 30000, retries: 3 } // Increased timeout and retries for better reliability
+      );
 
-  // Initialize speech recognition service
-  useEffect(() => {
-    speechService.current = new SpeechRecognitionService(
-      handleSpeechResult,
-      handleSpeechError,
-      async () => {
-        // User started speaking; if avatar is currently talking, interrupt IMMEDIATELY
-        // EXCEPTION: Don't interrupt the initial greeting - let it complete
-        if (isAvatarSpeakingRef.current && !isInitialGreetingRef.current) {
-          console.log('🚨 User speech detected - interrupting avatar immediately...');
+      console.log('🎤 Transcription response received:', transcriptionResponse);
+
+      // Handle transcription response - with response_format: 'text', it returns a string directly
+      let transcription: string;
+      
+      if (typeof transcriptionResponse === 'string') {
+        // Direct string response when using response_format: 'text'
+        transcription = transcriptionResponse;
+      } else if (transcriptionResponse && typeof transcriptionResponse === 'object' && 'text' in transcriptionResponse) {
+        // Object response when using other formats
+        transcription = transcriptionResponse.text;
+      } else {
+        console.error('Invalid transcription response structure:', transcriptionResponse);
+        return;
+      }
+      
+      // Check if transcription is valid
+      if (!transcription || typeof transcription !== 'string' || transcription.trim().length === 0) {
+        console.error('Invalid or empty transcription response:', transcriptionResponse);
+        return;
+      }
+
+      console.log('🎤 Transcription successful:', transcription);
+
+      // Check if user is asking about vision/camera analysis
+      const visionKeywords = [
+        'what do you see', 'what can you see', 'describe what you see', 'analyze', 'look at',
+        'camera', 'vision', 'see', 'watching', 'observe', 'describe', 'tell me about',
+        'what is that', 'what are you looking at', 'can you see', 'do you see'
+      ];
+      
+      const transcriptionLower = transcription.toLowerCase();
+      const isVisionRequest = visionKeywords.some(keyword => 
+        transcriptionLower.includes(keyword)
+      );
+
+      console.log('🎤 Vision check:', { 
+        transcription: transcription, 
+        isVisionRequest, 
+        isCameraActive: cameraStateRef.current, 
+        hasCameraRef: !!cameraVideoRef.current 
+      });
+
+      // If user is asking about vision, handle accordingly
+      if (isVisionRequest) {
+        console.log('👁️ Vision request detected! Checking camera state...', {
+          transcription,
+          isCameraActive: cameraStateRef.current,
+          hasCameraStream: !!cameraStream,
+          hasCameraRef: !!cameraVideoRef.current,
+          cameraStateRef: cameraStateRef.current,
+          cameraVideoReady: cameraVideoRef.current ? {
+            videoWidth: cameraVideoRef.current.videoWidth,
+            videoHeight: cameraVideoRef.current.videoHeight,
+            readyState: cameraVideoRef.current.readyState
+          } : null
+        });
+        
+        // Get current camera state dynamically
+        const currentCameraState = getCurrentCameraState();
+        
+        if (currentCameraState.isActive && currentCameraState.hasStream) {
+          console.log('👁️ Camera is active and has stream! Proceeding with vision analysis...');
+          console.log('👁️ Camera state details:', currentCameraState);
           
-          // CRITICAL: Set cancellation flag FIRST to stop ongoing speak() function
-          shouldCancelSpeechRef.current = true;
+          // Add a small delay to ensure camera is fully ready
+          setTimeout(() => {
+            handleVisionAnalysis(transcription);
+          }, 500);
           
-          // CRITICAL: Clear avatar speech state (synchronously) to prevent new speech
-          setAvatarSpeech('');
-          isAvatarSpeakingRef.current = false;
-          
-          // CRITICAL: Actually CALL and AWAIT the interrupt - don't just fire and forget
-          try {
-            // Use sessionId from ref (always current), fallback to ref data, then state
-            // Use dataRef instead of data to avoid stale closure issues
-            const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-            
-            if (avatar.current && currentSessionId) {
-              console.log('📞 Calling interrupt API with sessionId:', currentSessionId);
-              const interruptResult = await avatar.current.interrupt({
-                interruptRequest: {
-                  sessionId: currentSessionId
-                }
-              });
-              console.log('✅ Avatar interrupted successfully via API. Result:', interruptResult);
-            } else {
-              console.warn('⚠️ Cannot interrupt - avatar or sessionId not available', {
-                hasAvatar: !!avatar.current,
-                sessionIdFromRef: sessionIdRef.current,
-                sessionIdFromDataRef: dataRef.current?.sessionId,
-                sessionIdFromState: sessionId,
-                currentSessionId
-              });
-            }
-          } catch (err: any) {
-            console.error('❌ Interrupt API call failed:', err);
-            // Even if interrupt fails, we've cleared the state and set cancel flag
-            // Try to continue anyway - the state has been cleared
-          }
-          
-          // Immediately force resume recognition so user's ongoing speech can be captured
-          speechService.current?.forceResume();
-        } else if (isInitialGreetingRef.current) {
-          console.log('🛡️ Ignoring interrupt attempt during initial greeting');
+          return; // Don't process as regular conversation
+        } else {
+          // Camera not active but user asking about vision
+          console.log('👁️ Camera not ready for vision analysis:', {
+            isCameraActive: currentCameraState.isActive,
+            hasCameraStream: currentCameraState.hasStream,
+            hasCameraRef: !!cameraVideoRef.current,
+            cameraStateDetails: currentCameraState
+          });
+          const visionResponse = "I can't see anything right now because the camera isn't active. Please click the camera button to turn on the camera, and then I'll be able to see and describe what's in front of you!";
+          setInput(visionResponse);
+          console.log("INPUT", input);
+          return; // Don't process as regular conversation
         }
       }
-    );
-
-    return () => {
-      if (speechService.current) {
-        speechService.current.stopListening();
+      
+      // Check cache first for faster response (but skip cache if media context is active)
+      const cacheKey = transcription.toLowerCase().trim();
+      const cachedResponse = responseCache.current.get(cacheKey);
+      
+      console.log('🎤 Cache check:', { 
+        cacheKey, 
+        hasCachedResponse: !!cachedResponse, 
+        hasMediaContext, 
+        willUseCache: !!(cachedResponse && !hasMediaContext) 
+      });
+      
+      if (cachedResponse && !hasMediaContext) {
+        console.log('🚀 Using cached response for faster reply!');
+        setInput(cachedResponse);
+        console.log("INPUT", input);
+        
+        // Update conversation history
+        const updatedHistory = [...conversationHistory, { role: 'user', content: transcription }];
+        setConversationHistory(updatedHistory);
+        
+        const finalHistory = [...updatedHistory, { role: 'assistant', content: cachedResponse }];
+        setConversationHistory(finalHistory);
+        return;
       }
-    };
-  }, []);
-
-  // Auto-start continuous listening when avatar is running
-  // BUT: Don't start until initial greeting is complete (to avoid interfering with greeting)
-  useEffect(() => {
-    if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing && !isInitialGreetingRef.current) {
-      console.log('Auto-starting continuous speech recognition...');
-      handleStartListening();
-    }
-  }, [isAvatarRunning, isListening, isAiProcessing]);
-
-  // Periodic check to ensure speech recognition stays active
-  // BUT: Don't start/restart during initial greeting
-  useEffect(() => {
-    if (isAvatarRunning && speechService.current) {
-      const checkInterval = setInterval(() => {
-        // CRITICAL: Only restart if:
-        // 1. Greeting is complete
-        // 2. Not currently processing AI
-        // 3. Avatar is NOT speaking
-        // 4. Not in grace period (waiting for resume after avatar stopped)
-        if (speechService.current && 
-            !speechService.current.isActive() && 
-            !isAiProcessing && 
-            !isInitialGreetingRef.current &&
-            !isAvatarSpeakingRef.current &&
-            !speechService.current.isInGracePeriod()) {
-          console.log('Speech recognition not active, restarting...');
-          speechService.current.forceRestart();
-        } else if (speechService.current && !speechService.current.isActive()) {
-          // Log why we're not restarting (for debugging)
-          if (isAiProcessing) {
-            console.log('⚠️ Skipping restart - AI processing');
-          } else if (isInitialGreetingRef.current) {
-            console.log('⚠️ Skipping restart - initial greeting');
-          } else if (isAvatarSpeakingRef.current) {
-            console.log('⚠️ Skipping restart - avatar is speaking');
-          } else if (speechService.current.isInGracePeriod()) {
-            console.log('⚠️ Skipping restart - in grace period after avatar stopped');
+      
+      // Build messages array with conversation history and media context
+      const messages: any[] = [];
+      
+      // Always add system prompt first
+      messages.push({
+        role: 'system',
+        content: 'You are an intelligent, conversational AI assistant with a warm and engaging personality. Think of yourself as a knowledgeable friend who loves to chat and explore ideas together. Be genuinely curious, ask thoughtful questions, and show real interest in what the user is sharing. When discussing images or media, be specific about what you notice and ask engaging follow-up questions. Use natural language patterns, show personality, and make the conversation flow smoothly. Be helpful, insightful, and encouraging. Keep responses conversational and under 150 words, but don\'t be afraid to show enthusiasm and intelligence.'
+      });
+      
+      // Add media analysis if available (check both state and ref)
+      const effectiveMediaContext = hasMediaContext || mediaContextRef.current.hasContext;
+      const effectiveAnalysis = currentMediaAnalysis || mediaContextRef.current.analysis;
+      const effectiveFileName = mediaFileName || mediaContextRef.current.fileName;
+      
+      if (effectiveMediaContext && effectiveAnalysis && effectiveFileName) {
+        console.log('🎯 Media context is active!', { 
+          hasMediaContext, 
+          mediaFileName, 
+          currentMediaAnalysis,
+          refContext: mediaContextRef.current
+        });
+        
+        // Create a more natural, conversational context message
+        const fileType = effectiveFileName.split('.').pop()?.toLowerCase();
+        const mediaType = fileType && ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileType) ? 'image' :
+                         fileType && ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(fileType) ? 'video' :
+                         fileType && ['txt', 'pdf', 'doc', 'docx'].includes(fileType) ? 'document' : 'file';
+        
+        // Create more natural, ChatGPT-like context messages
+        const contextPrompts = [
+          `I just took a look at your ${mediaType} "${effectiveFileName}" - this is really interesting! ${effectiveAnalysis}\n\nI'm curious, what drew you to this ${mediaType}? What would you like to explore about it?`,
+          `Your ${mediaType} "${effectiveFileName}" caught my attention! Here's what I'm seeing: ${effectiveAnalysis}\n\nWhat aspects are you most interested in discussing?`,
+          `I've been examining your ${mediaType} "${effectiveFileName}" and I'm genuinely impressed. ${effectiveAnalysis}\n\nWhat questions do you have about it? I'd love to dive deeper into whatever interests you most.`,
+          `This ${mediaType} "${effectiveFileName}" is fascinating! ${effectiveAnalysis}\n\nWhat made you choose this particular ${mediaType}? I'm excited to explore it with you.`,
+          `I just finished analyzing your ${mediaType} "${effectiveFileName}" and wow, there's a lot to unpack here! ${effectiveAnalysis}\n\nWhat would you like to focus on? I'm here to help you understand or explore any aspect that interests you.`,
+          `Your ${mediaType} "${effectiveFileName}" is really compelling! ${effectiveAnalysis}\n\nI'm genuinely curious - what's your connection to this? What would you like to know more about?`,
+          `I've been studying your ${mediaType} "${effectiveFileName}" and I'm finding it quite engaging. ${effectiveAnalysis}\n\nWhat sparked your interest in this? I'd love to hear your thoughts and explore it together.`,
+          `This ${mediaType} "${effectiveFileName}" is quite something! ${effectiveAnalysis}\n\nWhat aspects are you most curious about? I'm here to help you understand or discuss whatever interests you most.`
+        ];
+        
+        const randomContextPrompt = contextPrompts[Math.floor(Math.random() * contextPrompts.length)];
+        messages.push({
+          role: 'assistant',
+          content: randomContextPrompt
+        });
+      } else {
+        console.log('❌ No media context', { 
+          hasMediaContext, 
+          mediaFileName, 
+          currentMediaAnalysis,
+          refContext: mediaContextRef.current
+        });
+      }
+      
+      // Add conversation history
+      messages.push(...conversationHistory);
+      
+      // Add current user message
+      messages.push({ role: 'user', content: transcription || '' });
+      
+      console.log('📤 Sending messages to OpenAI:', messages);
+      
+      // Update conversation history
+      const updatedHistory = [...conversationHistory, { role: 'user', content: transcription }];
+      setConversationHistory(updatedHistory);
+      
+      try {
+        const specificResponse = await createApiCall(
+          () => openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: messages,
+            max_tokens: 400, // Reduced for faster response
+            temperature: 0.8
+          }),
+          { timeout: 30000, retries: 3 } // Increased timeout and retries for better reliability
+        );
+        
+        console.log('📤 OpenAI response received:', specificResponse);
+        
+        const aiMessage = (specificResponse as any).choices[0].message.content || '';
+        
+        if (!aiMessage || aiMessage.trim().length === 0) {
+          console.error('Empty AI response received');
+          return;
+        }
+        
+        console.log('🎤 AI response:', aiMessage);
+        
+        // Cache the response for future use
+        responseCache.current.set(cacheKey, aiMessage);
+        
+        // Limit cache size to prevent memory issues
+        if (responseCache.current.size > 50) {
+          const firstKey = responseCache.current.keys().next().value;
+          if (firstKey) {
+            responseCache.current.delete(firstKey);
           }
         }
-      }, 5000); // Check every 5 seconds
-
-      return () => clearInterval(checkInterval);
+        
+        setInput(aiMessage);
+        console.log("INPUT", input);
+        
+        // Update conversation history with AI response
+        const finalHistory = [...updatedHistory, { role: 'assistant', content: aiMessage }];
+        setConversationHistory(finalHistory);
+        
+      } catch (apiError) {
+        console.error('🎤 Error in OpenAI API call:', apiError);
+        // Don't return here, let the error be caught by the outer try-catch
+        throw apiError;
+      }
+    } catch (error: any) {
+      console.error('Error transcribing audio:', error);
+      
+      // If there's an error and we have media context, try to provide a fallback response
+      if (hasMediaContext || mediaContextRef.current.hasContext) {
+        console.log('🎤 Providing fallback response due to transcription error');
+        const fallbackResponses = [
+          "I'm having trouble hearing you clearly - could you try speaking a bit louder or closer to the microphone? I'm really interested in what you have to say about the image!",
+          "I didn't quite catch that. Could you repeat what you said about the image? I'm genuinely curious to hear your thoughts.",
+          "I'm experiencing some audio issues right now. Can you try asking your question about the image again? I'd love to help you explore it.",
+          "I didn't quite hear that clearly. What would you like to know about the image you uploaded? I'm excited to discuss it with you.",
+          "I'm having trouble processing your voice right now, but I'm really interested in what you have to say. Could you try again? I'd love to hear your thoughts about the image."
+        ];
+        
+        const randomFallback = fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)];
+        setInput(randomFallback);
+        console.log("INPUT", input);
+      }
     }
-  }, [isAvatarRunning, isAiProcessing]);
+  }
 
-
-  // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
+  // useEffect getting triggered when the input state is updated, basically make the avatar to talk
   useEffect(() => {
     async function speak() {
-      // Use sessionId from ref (always current), fallback to ref data, then state
-      const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-      if (avatarSpeech && currentSessionId) {
-        // CRITICAL: Check cancellation flag FIRST before starting
-        if (shouldCancelSpeechRef.current) {
-          console.log('⚠️ Skipping avatar speech - cancellation flag is set');
-          setAvatarSpeech('');
-          shouldCancelSpeechRef.current = false; // Reset flag
-          return;
-        }
-        
-        // CRITICAL: Reset cancellation flag at start of new speech
-        shouldCancelSpeechRef.current = false;
-        
-        // CRITICAL: If AI is processing, wait for it to complete before speaking
-        // This ensures the AI response is ready before the avatar speaks
-        // But DON'T clear avatarSpeech - we'll speak it once processing completes
-        if (isAiProcessing) {
-          console.log('⏳ Waiting for AI processing to complete before avatar speaks...');
-          // Don't clear avatarSpeech - keep it so we can speak it after processing
-          // The useEffect will re-run when isAiProcessing becomes false
-          return;
-        }
-        
-        // CRITICAL: Double-check avatar is not already speaking (race condition protection)
-        if (isAvatarSpeakingRef.current) {
-          console.log('⚠️ Skipping avatar speech - avatar already speaking');
-          setAvatarSpeech('');
-          return;
-        }
-        
-        try {
-          // Store the current avatarSpeech value to check if it was cleared during speak
-          const speechToSpeak = avatarSpeech;
-          
-          // CRITICAL: Suspend speech recognition BEFORE setting speaking flag to avoid any race conditions
-          // Note: suspend() now keeps recognition running but marks it for careful filtering
-          // This allows user interruptions to be detected while filtering out echo
-          // Pass the avatar speech text for echo detection
-          speechService.current?.suspend(speechToSpeak);
-          // No delay needed - recognition stays active, just marked as suspended for filtering
-          
-          isAvatarSpeakingRef.current = true;
-          console.log('🗣️ Avatar starting to speak:', avatarSpeech.substring(0, 50) + '...');
-          
-          // Call speak API
-          // Note: If interrupted, the server will stop but the promise may still resolve
-          // The handleAvatarStopTalking event will handle cleanup
-          const speakPromise = avatar.current?.speak({ taskRequest: { text: speechToSpeak, sessionId: currentSessionId } });
-          
-          // CRITICAL: Check cancellation flag periodically during speak
-          // If cancelled while speaking, the promise will still resolve but we'll handle it
-          await speakPromise;
-          
-          // CRITICAL: After speak completes, check if it was cancelled/interrupted
-          // (The interrupt might have happened during speak, and handleAvatarStopTalking 
-          // would have already set isAvatarSpeakingRef.current = false)
-          if (shouldCancelSpeechRef.current || !isAvatarSpeakingRef.current) {
-            console.log('⚠️ Speech was cancelled/interrupted - speak() completed but was interrupted');
-            // Clear initial greeting flag if it was interrupted
-            if (isInitialGreetingRef.current) {
-              isInitialGreetingRef.current = false;
-            }
-            // Reset cancellation flag
-            shouldCancelSpeechRef.current = false;
-            // Don't update state - handleAvatarStopTalking already did it
-            return;
-          }
-          
-          // If this was the initial greeting, clear the flag now that it's complete
-          if (isInitialGreetingRef.current) {
-            console.log('✅ Initial greeting completed successfully');
-            isInitialGreetingRef.current = false;
-          }
-          
-          console.log('✅ Avatar finished speaking naturally (not interrupted)');
-        } catch (err: any) {
-          console.error('Speak failed:', err);
-          // If speak fails, reset speaking state
-          isAvatarSpeakingRef.current = false;
-          shouldCancelSpeechRef.current = false;
-          speechService.current?.resume();
-        } finally {
-          // Only reset speaking state if we weren't cancelled
-          if (!shouldCancelSpeechRef.current && isAvatarSpeakingRef.current) {
-            // State will be set by handleAvatarStopTalking event
-          }
-        }
-      }
+      if (!input || !sessionTokenRef.current || !sessionIdRef.current) return;
+      
+      // Use the new control method
+      await startAvatarSpeaking(input);
     }
 
     speak();
-  }, [avatarSpeech, sessionId, isAiProcessing]);
+  }, [input]);
 
-  // Bind the vision camera stream to the small overlay video when present
+
+  // Debug camera state changes and update ref for voice detection
   useEffect(() => {
-    if (visionVideoRef.current && visionCameraStream) {
-      visionVideoRef.current.srcObject = visionCameraStream;
-      visionCameraStreamRef.current = visionCameraStream; // Also update ref
-      visionVideoRef.current.onloadedmetadata = () => {
-        try { visionVideoRef.current && visionVideoRef.current.play(); } catch { }
-      };
-    }
-  }, [visionCameraStream]);
+    console.log('📹 Camera state changed:', {
+      isCameraActive,
+      hasCameraStream: !!cameraStream,
+      hasCameraRef: !!cameraVideoRef.current,
+      cameraVideoDimensions: cameraVideoRef.current ? {
+        videoWidth: cameraVideoRef.current.videoWidth,
+        videoHeight: cameraVideoRef.current.videoHeight,
+        readyState: cameraVideoRef.current.readyState
+      } : null
+    });
+    
+    // Update the refs for voice detection
+    const previousCameraState = cameraStateRef.current;
+    cameraStateRef.current = isCameraActive;
+    cameraStreamRef.current = cameraStream;
+    console.log('📹 Updated camera state ref:', { 
+      previous: previousCameraState, 
+      current: cameraStateRef.current, 
+      isCameraActive,
+      hasCameraStream: !!cameraStream
+    });
+  }, [isCameraActive, cameraStream]);
 
-  // Helper: capture full-quality frame DataURL for analysis
-  function captureVisionFrameDataUrl(quality = 0.8): string | null {
-    if (!visionVideoRef.current) return null;
-    const video = visionVideoRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
-    // Ensure a safe minimum pixel count to satisfy xAI Vision
-    const MIN_PIXELS = 1024; // safety margin > 512
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const pixels = vw * vh;
-    const scale = pixels < MIN_PIXELS ? Math.sqrt(MIN_PIXELS / Math.max(pixels, 1)) : 1;
-    const cw = Math.max(2, Math.floor(vw * scale));
-    const ch = Math.max(2, Math.floor(vh * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = cw;
-    canvas.height = ch;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(video, 0, 0, cw, ch);
-    return canvas.toDataURL('image/jpeg', quality);
-  }
-
-  // Auto vision analysis removed - AI will only analyze camera frames when user explicitly asks
-  // This prevents continuous automatic analysis that was happening before
-
-
-  // useEffect called when the component mounts, to fetch the accessToken and automatically start the avatar
+  // Separate effect to monitor for unexpected camera state changes
   useEffect(() => {
-    async function initializeAndStartAvatar() {
-      try {
-        const response = await getAccessToken();
-        const token = response.data.data.token;
-
-        if (!avatar.current) {
-          avatar.current = new StreamingAvatarApi(
-            new Configuration({
-              accessToken: token,
-              basePath: '/api/heygen'
-            })
-          );
+    // Only check for unexpected state changes after a delay to avoid race conditions
+    const timeoutId = setTimeout(() => {
+      // Check if camera stream exists but camera is marked as inactive
+      // This should only happen if there's a genuine issue, not during normal transitions
+      if (cameraStream && cameraStream.getTracks().length > 0 && !isCameraActive) {
+        console.log('📹 Unexpected camera state detected - stream exists but camera marked inactive');
+        console.log('📹 Stream tracks:', cameraStream.getTracks().length);
+        console.log('📹 Video tracks:', cameraStream.getVideoTracks().length);
+        console.log('📹 Audio tracks:', cameraStream.getAudioTracks().length);
+        
+        // Only restore if we have active video tracks
+        const videoTracks = cameraStream.getVideoTracks();
+        if (videoTracks.length > 0 && videoTracks[0].readyState === 'live') {
+          console.log('📹 Restoring camera state - video track is live');
+          setIsCameraActive(true);
+          cameraStateRef.current = true;
         }
-        console.log(avatar.current)
-        // Clear any existing event handlers to prevent duplication
-        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
-        avatar.current.addEventHandler("avatar_stop_talking", handleAvatarStopTalking);
+      }
+      
+      // Also check for the opposite case - camera marked active but no stream
+      if (isCameraActive && (!cameraStream || cameraStream.getTracks().length === 0)) {
+        console.log('📹 Camera marked active but no stream - this should not happen');
+        console.log('📹 Current state:', { isCameraActive, hasCameraStream: !!cameraStream });
+      }
+    }, 500); // Wait 500ms to avoid race conditions
 
-        // Automatically start the avatar
-        await startAvatar();
+    return () => clearTimeout(timeoutId);
+  }, [cameraStream, isCameraActive]);
+
+  // Add global debugging function
+  useEffect(() => {
+    (window as any).debugCameraState = () => {
+      console.log('📹 Current camera state:', {
+        isCameraActive,
+        hasCameraStream: !!cameraStream,
+        cameraStateRef: cameraStateRef.current,
+        streamTracks: cameraStream?.getTracks().length || 0,
+        videoTracks: cameraStream?.getVideoTracks().length || 0,
+        audioTracks: cameraStream?.getAudioTracks().length || 0,
+        hasCameraRef: !!cameraVideoRef.current
+      });
+    };
+    
+    // Call it immediately to show current state
+    (window as any).debugCameraState();
+  }, [isCameraActive, cameraStream]);
+
+  // useEffect called when the component mounts, to fetch the session token
+  useEffect(() => {
+    async function fetchSessionToken() {
+      try {
+        const response = await getSessionToken();
+        const token = response.data.token;
+        sessionTokenRef.current = token;
+        console.log('Session token fetched successfully');
+
+        // Automatically start the avatar session
+        await grab();
+
+        // Start automatic voice detection after avatar is ready
+        // Voice detection will be started from within grab() function after session is ready
+
+        // Add user interaction handler for Android autoplay
+        const handleUserInteraction = () => {
+          if (mediaStream.current && mediaStream.current.paused) {
+            mediaStream.current.play().catch(console.error);
+          }
+        };
+
+        document.addEventListener('touchstart', handleUserInteraction, { once: true });
+        document.addEventListener('click', handleUserInteraction, { once: true });
 
       } catch (error: any) {
-        console.error("Error initializing avatar:", error);
-        toast({
-          variant: "destructive",
-          title: "Uh oh! Something went wrong.",
-          description: error.response.data.message || error.message,
-        })
+        console.error("Error fetching session token:", error);
       }
     }
 
-    initializeAndStartAvatar();
+    fetchSessionToken();
 
     return () => {
-      // Cleanup event handler and timeout
-      if (avatar.current) {
-        avatar.current.removeEventHandler("avatar_stop_talking", handleAvatarStopTalking);
-      }
+      // Cleanup timeout
       clearTimeout(timeout);
+      
+      // Cleanup camera analysis interval
+      if (analysisIntervalRef.current) {
+        clearInterval(analysisIntervalRef.current);
+      }
+      
+      // Cleanup speaking timer
+      if (speakingTimerRef.current) {
+        clearTimeout(speakingTimerRef.current);
+      }
+      
+      // Cleanup LiveKit service
+      if (liveKitService.current) {
+        liveKitService.current.cleanup();
+      }
+      
+      // Stop streaming session if active
+      if (sessionTokenRef.current && sessionIdRef.current) {
+        stopStreamingSession(sessionTokenRef.current, sessionIdRef.current).catch(console.error);
+      }
     }
 
   }, []);
 
-  // Avatar stop talking event handler
-  const handleAvatarStopTalking = (e: any) => {
-    console.log("Avatar stopped talking", e);
+
+
+// Function to initiate the avatar with optimized loading and progress tracking
+async function grab() {
+  setStartLoading(true);
+  setStartAvatarLoading(true);
+  setLoadingProgress(0);
+  
+  try {
+    // Step 1: Get session token (20% progress)
+    const tokenResponse = await getSessionToken();
+    setLoadingProgress(20);
     
-    // Check if this stop was due to interruption
-    if (shouldCancelSpeechRef.current) {
-      console.log('🛑 Avatar stopped due to user interruption');
-      shouldCancelSpeechRef.current = false; // Reset flag
-      // If interrupted, clear initial greeting flag (user spoke, greeting is done)
-      if (isInitialGreetingRef.current) {
-        isInitialGreetingRef.current = false;
+    const sessionToken = tokenResponse.data.token;
+    sessionTokenRef.current = sessionToken;
+
+    // Step 2: Initialize LiveKit service (40% progress)
+    if (!liveKitService.current) {
+      liveKitService.current = new LiveKitService();
+    }
+    setLoadingProgress(40);
+
+    // Step 3: Create new session (60% progress)
+    const sessionResponse = await createNewSession(
+      sessionToken,
+      import.meta.env.VITE_HEYGEN_AVATARID,
+      import.meta.env.VITE_HEYGEN_VOICEID,
+      "Hello My name is 6, your personal assistant. How can I help you today?"
+    );
+    
+    const sessionInfo = sessionResponse.data;
+    sessionInfoRef.current = sessionInfo;
+    sessionIdRef.current = sessionInfo.session_id;
+    
+    console.log('Avatar session created:', sessionInfo);
+    setLoadingProgress(60);
+
+    // Step 4: Create LiveKit room and prepare connection (80% progress)
+    await liveKitService.current.createRoom();
+    await liveKitService.current.prepareConnection(sessionInfo.url, sessionInfo.access_token);
+    
+    // Connect WebSocket with custom opening text
+    await liveKitService.current.connectWebSocket(
+      sessionInfo.session_id,
+      sessionToken,
+      "Hello My name is 6, your personal assistant. How can I help you today?"
+    );
+    setLoadingProgress(80);
+
+    // Step 5: Start streaming session (90% progress)
+    await startStreamingSession(sessionToken, sessionInfo.session_id);
+    await liveKitService.current.connect(sessionInfo.url, sessionInfo.access_token);
+    
+    // Step 6: Set up video stream (100% progress)
+    setData(sessionInfo);
+    const mediaStream = liveKitService.current.getMediaStream();
+    if (mediaStream) {
+      setStream(mediaStream);
+    }
+    setIsSessionStarted(true);
+    
+    setLoadingProgress(100);
+    
+    // Clear loading states
+    setStartLoading(false);
+    setStartAvatarLoading(false);
+    
+    // Start voice chat and pre-warm in parallel (non-blocking)
+    // Add delay to ensure avatar session is fully ready before starting voice detection
+    setTimeout(() => {
+      Promise.all([
+        startContinuousListening(),
+        preWarmAvatarForResponse()
+      ]).catch(error => {
+        console.warn('Background initialization failed:', error);
+      });
+    }, 3000); // Wait 2 seconds for avatar to be fully ready
+
+  } catch (error: any) {
+    console.error('Avatar initialization failed:', error.message);
+    setStartAvatarLoading(false);
+    setStartLoading(false);
+    setLoadingProgress(0); 
+  }
+};
+
+
+// Camera functions
+const handleCameraClick = async () => {
+  console.log('📹 Camera button clicked! Current state:', { isCameraActive, hasCameraStream: !!cameraStream });
+  
+  if (isCameraActive) {
+    // Stop camera
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+    
+    // Clear analysis interval
+    if (analysisIntervalRef.current) {
+      clearInterval(analysisIntervalRef.current);
+      analysisIntervalRef.current = null;
+    }
+    
+    setIsCameraActive(false);
+    setIsAnalyzing(false);
+    
+    // Update camera state ref for voice detection
+    const previousCameraState = cameraStateRef.current;
+    cameraStateRef.current = false;
+    cameraStreamRef.current = null;
+    console.log('📹 Camera deactivated - voice threshold should now be 30:', {
+      previous: previousCameraState,
+      current: cameraStateRef.current
+    });
+    
+  } else {
+    // Start camera with rear-facing preference
+    console.log('📹 Starting camera activation...');
+    try {
+      // Try to get rear-facing camera first
+      let stream: MediaStream;
+      
+      try {
+        // Request rear-facing/primary camera with audio for voice detection
+        console.log('📹 Requesting rear-facing camera with audio...');
+        // Get preferred microphone device
+        const deviceId = await getPreferredMicrophone();
+        const audioConstraints = deviceId ? { deviceId: { ideal: deviceId } } : true;
+        
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { 
+            width: { ideal: 320 },
+            height: { ideal: 240 },
+            facingMode: { ideal: 'environment' } // Rear-facing camera
+          },
+          audio: audioConstraints // Enable audio for voice detection with preferred mic
+        });
+        console.log('📹 Rear-facing camera obtained successfully');
+      } catch (rearError) {
+        console.log('📹 Rear camera not available, trying any camera...', rearError);
+        // Fallback to any available camera with audio
+        const deviceId = await getPreferredMicrophone();
+        const audioConstraints = deviceId ? { deviceId: { ideal: deviceId } } : true;
+        
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { 
+            width: { ideal: 320 },
+            height: { ideal: 240 }
+          },
+          audio: audioConstraints // Enable audio for voice detection with preferred mic
+        });
+        console.log('📹 Fallback camera obtained successfully');
       }
       
-      // CRITICAL: If user interrupted and continued speaking, process their speech now
-      // This ensures accumulated text gets processed even if recognition is still active
-      // Use a slightly longer delay to give recognition time to capture more of user's speech
-      // BUT: Only process if avatar is NOT already speaking a new response
+      setCameraStream(stream);
+      setIsCameraActive(true);
+      
+      // Update refs immediately for voice detection
+      cameraStateRef.current = true;
+      cameraStreamRef.current = stream;
+      
+      console.log('📹 Camera activated successfully:', {
+        hasStream: !!stream,
+        streamTracks: stream.getTracks().length,
+        videoTracks: stream.getVideoTracks().length,
+        audioTracks: stream.getAudioTracks().length,
+        cameraStateRef: cameraStateRef.current
+      });
+      
+      console.log('📹 Camera state ref updated to true - voice threshold should now be 20');
+      
+      // Add immediate verification
       setTimeout(() => {
-        // CRITICAL: Don't process if avatar is already speaking a new response, AI is processing, or we're already processing speech
-        // This prevents processing stale speech that was already handled and prevents duplicate API calls
-        if (isAvatarSpeakingRef.current || isAiProcessing || isProcessingSpeechRef.current) {
-          console.log('⚠️ Skipping processPendingSpeech - avatar already speaking new response, AI processing, or speech already being processed');
-          return;
-        }
+        console.log('📹 Camera activation verification:', {
+          isCameraActive,
+          cameraStateRef: cameraStateRef.current,
+          hasCameraStream: !!cameraStream,
+          streamTracks: cameraStream?.getTracks().length || 0
+        });
         
-        if (speechService.current) {
-          console.log('🔄 Processing pending user speech after interrupt...');
-          speechService.current.processPendingSpeech();
-        }
-      }, 800); // Longer delay to allow user to finish speaking after interrupt
-    } else if (isInitialGreetingRef.current) {
-      // Greeting completed naturally
-      console.log('✅ Initial greeting completed naturally');
-      isInitialGreetingRef.current = false;
-      // Start speech recognition now that greeting is complete
-      setTimeout(() => {
-        if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing) {
-          console.log('Starting speech recognition after greeting completion...');
-          handleStartListening();
-        }
-      }, 500);
-    }
-    
-    isAvatarSpeakingRef.current = false;
-    // Resume recognition after a short delay to avoid capturing tail of TTS
-    // But only if greeting is complete
-    if (!isInitialGreetingRef.current) {
-      setTimeout(() => {
-        if (!isAiProcessing) {
-          speechService.current?.resume();
-        }
-      }, 600);
-    }
-  };
-
-
-  // Function to start the avatar (extracted from grab function)
-  async function startAvatar() {
-    setStartAvatarLoading(true);
-    setIsAvatarFullScreen(true);
-
-    // Check if required environment variables are present
-    const avatarId = import.meta.env.VITE_HEYGEN_AVATARID;
-    const voiceId = import.meta.env.VITE_HEYGEN_VOICEID;
-
-    if (!avatarId || !voiceId) {
-      setStartAvatarLoading(false);
-      toast({
-        variant: "destructive",
-        title: "Missing Configuration",
-        description: 'Missing HeyGen environment variables. Please check VITE_HEYGEN_AVATARID and VITE_HEYGEN_VOICEID in your .env file.',
-      });
-      return;
-    }
-
-    try {
-      // Add error handling for the streaming API
-      const res = await avatar.current!.createStartAvatar(
-        {
-          newSessionRequest: {
-            quality: "high",
-            avatarName: avatarId,
-            voice: { voiceId: voiceId }
-          }
-        },
-      );
-      console.log('Avatar session created:', res);
-      // Extract and store sessionId defensively from various possible shapes
-      const newSessionId = (res as any)?.sessionId || (res as any)?.data?.sessionId || (res as any)?.session_id || null;
-      if (newSessionId) {
-        setSessionId(newSessionId);
-        sessionIdRef.current = newSessionId; // Also update ref for callback access
-        console.log('✅ SessionId set:', newSessionId);
-      } else {
-        console.warn('No sessionId found in start response:', res);
-      }
-
-      // Set up the media stream with proper error handling
-      if (avatar.current?.mediaStream) {
-        setData(res);
-        dataRef.current = res; // Also update ref for callback access
-        setStream(avatar.current.mediaStream);
-        setStartAvatarLoading(false);
-        setIsAvatarRunning(true);
-        // Greet the user after stream and session are ready
-        setTimeout(() => {
-          if (sessionId || newSessionId) {
-            // CRITICAL: Stop speech recognition completely before greeting to prevent it from capturing avatar's voice
-            // This is more reliable than suspend() - we don't want any recognition running during initial greeting
-            const greetingText = 'Hello, I am 6, your personal assistant. How can I help you today?';
-            if (speechService.current) {
-              console.log('Stopping speech recognition completely before greeting...');
-              speechService.current.stopListening();
-              // Also suspend to mark that avatar will be speaking, pass greeting text for echo detection
-              speechService.current.suspend(greetingText);
-            }
-            // Mark this as initial greeting to protect it from interruption
-            isInitialGreetingRef.current = true;
-            console.log('👋 Starting initial greeting...');
-            setAvatarSpeech(greetingText);
-          }
-        }, 1500);
-        console.log('Avatar started successfully');
-
-        // Try to play immediately after a micro delay to ensure DOM is updated
-        setTimeout(() => {
-          playVideo();
-        }, 10);
-      } else {
-        throw new Error('Media stream not available');
-      }
-
-    } catch (error: any) {
-      console.error('Error starting avatar:', error);
-      console.error('Error details:', {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-        avatarId: avatarId,
-        voiceId: voiceId
-      });
-      setStartAvatarLoading(false);
-
-      let errorMessage = 'Failed to start avatar. Please check your HeyGen configuration.';
-      if (error.response?.status === 400) {
-        errorMessage = 'Invalid avatar or voice configuration. Please check your HeyGen avatar and voice IDs.';
-      } else if (error.response?.status === 401) {
-        errorMessage = 'Invalid HeyGen API key. Please check your authentication.';
-      } else if (error.response?.status === 404) {
-        errorMessage = 'Avatar or voice not found. Please check your HeyGen configuration.';
-      } else if (error.message?.includes('debugStream')) {
-        errorMessage = 'Streaming connection error. Please try refreshing the page.';
-      }
-
-      toast({
-        variant: "destructive",
-        title: "Error starting avatar",
-        description: errorMessage,
-      })
+        // Test voice threshold calculation
+        const testThreshold = cameraStateRef.current ? 20 : 30;
+        console.log('📹 Voice threshold test:', { 
+          cameraStateRef: cameraStateRef.current, 
+          expectedThreshold: 20, 
+          calculatedThreshold: testThreshold 
+        });
+      }, 100);
+      
+      // Camera is now passive - only analyzes when user asks something
+      // No automatic analysis interval
+      
+    } catch (error) {
+      console.error('Error accessing camera:', error);
     }
   }
+};
 
+const handleMotionDetected = () => {
+  // Motion detected - user is moving
+  // console.log('👀 Ooh! I see some movement! Someone is getting active!');
+};
 
-
-
-
-  // (barge-in handled inline in speech start callback)
-
-
-
-
-
-  // When the stream gets the data, The avatar video will gets played
-  useEffect(() => {
-    if (stream && mediaStream.current) {
-      console.log(stream);
-      console.log(mediaStream.current);
-      mediaStream.current.srcObject = stream;
-      mediaStream.current.muted = false;
-      mediaStream.current.volume = 1.0;
-
-      // Try to play immediately
-      playVideo();
-
-      // Also try on loadedmetadata as backup
-      mediaStream.current.onloadedmetadata = () => {
-        playVideo();
-      };
+const handleMotionStopped = async () => {
+  if (isAnalyzing || isAvatarSpeaking) return; // Prevent analysis while avatar is speaking or already analyzing
+  
+  console.log('🎭 Time to analyze this masterpiece! Let me put on my comedy glasses...');
+  setIsAnalyzing(true);
+  
+  try {
+    // Capture current frame for analysis
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!cameraVideoRef.current || !ctx) return;
+    
+    canvas.width = cameraVideoRef.current.videoWidth;
+    canvas.height = cameraVideoRef.current.videoHeight;
+    ctx.drawImage(cameraVideoRef.current, 0, 0);
+    
+    // Convert to base64 for OpenAI Vision API
+    const imageData = canvas.toDataURL('image/jpeg', 0.8);
+    
+    // Analyze with OpenAI Vision using optimized settings
+    const response = await createApiCall(
+      async () => {
+        const stream = await openai.chat.completions.create({
+          model: "gpt-4o", // Updated to use gpt-4o model
+          messages: [
+            {
+              role: "system",
+              content: `You are a hilarious AI that analyzes images with humor and wit! Your analysis should be:
+              - Extremely funny and entertaining
+              - Use puns, jokes, and witty observations about what you see
+              - Be enthusiastic and make people laugh
+              - Add humorous commentary about facial expressions, poses, or situations
+              - Make funny comparisons or references
+              - Keep it light-hearted and positive
+              - Always end with a funny observation or joke
+              - Keep responses concise (under 200 characters) for real-time display
+              - Write as if you're speaking directly to the person (no emojis in speech)
+              - Use conversational, natural language that sounds good when spoken aloud`
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Analyze this image and provide a hilarious, witty description of what you see! Focus on the person's facial expression, body language, and any notable details. Make it funny and entertaining! Speak directly to the person as if you're commenting on what they're doing right now."
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: imageData
+                  }
+                }
+              ]
+            }
+          ],
+          max_tokens: 400,   
+          stream: true // Enable streaming for faster response
+        });
+        
+        // Process the stream and return the full response
+        let fullResponse = '';
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) {
+            fullResponse += content;
+          }
+        }
+        return { choices: [{ message: { content: fullResponse } }] } as any;
+      },
+      { timeout: 45000, retries: 2 }
+    );
+    
+    const fullAnalysis = response.choices[0].message.content || '';
+    
+    // Add the analysis to the queue for avatar speech
+    if (fullAnalysis.trim()) {
+      analysisQueueRef.current.push(fullAnalysis.trim());
+      if (!isProcessingQueueRef.current) {
+        processAnalysisQueue();
+      }
     }
-  }, [stream]);
+    
+    console.log('🎪 My hilarious analysis:', fullAnalysis);
+    
+  } catch (error) {
+    console.error('Error analyzing image:', error);
+  } finally {
+    setIsAnalyzing(false);
+  }
+};
 
-  // Function to play video with proper error handling
-  const playVideo = async () => {
-    if (mediaStream.current) {
-      try {
-        // Try to play immediately regardless of readyState
-        await mediaStream.current.play();
-        console.log('Video started playing successfully');
-        setVideoNeedsInteraction(false);
-      } catch (error: any) {
-        console.error('Error playing video:', error);
-        if (error.name === 'NotAllowedError') {
-          console.log('Autoplay blocked, video will play when user interacts with the page');
-          setVideoNeedsInteraction(true);
-        } else if (error.name === 'AbortError') {
-          console.log('Video play was aborted, this is usually normal');
-        } else {
-          // For other errors, try again after a short delay
-          setTimeout(() => {
+// Handle vision analysis when user asks about what they see
+const handleVisionAnalysis = async (userQuestion: string) => {
+  if (isAnalyzing || isAvatarSpeaking) return; // Prevent analysis while avatar is speaking or already analyzing
+  
+  console.log('🎭 User asked about vision! Let me analyze what I see...');
+  const currentCameraState = getCurrentCameraState();
+  console.log('🎭 Camera state:', { 
+    ...currentCameraState,
+    hasCameraRef: !!cameraVideoRef.current,
+    cameraVideoDimensions: cameraVideoRef.current ? {
+      videoWidth: cameraVideoRef.current.videoWidth,
+      videoHeight: cameraVideoRef.current.videoHeight
+    } : null
+  });
+  
+  setIsAnalyzing(true);
+  
+  try {
+    // Check if camera is active and has video element
+    if (!currentCameraState.isActive || !currentCameraState.hasStream) {
+      console.error('🎭 Camera not active or no stream available:', {
+        ...currentCameraState,
+        hasCameraRef: !!cameraVideoRef.current
+      });
+      const errorResponse = "I can't see anything right now because the camera isn't active. Please make sure the camera is turned on and try again.";
+      analysisQueueRef.current.push(errorResponse);
+      if (!isProcessingQueueRef.current) {
+        processAnalysisQueue();
+      }
+      return;
+    }
+    
+    // Additional check: ensure camera stream has video tracks
+    const videoTracks = currentCameraState.stream?.getVideoTracks() || [];
+    if (videoTracks.length === 0) {
+      console.error('🎭 Camera stream has no video tracks');
+      const errorResponse = "I can't see anything because the camera feed isn't working properly. Please try turning the camera off and on again.";
+      analysisQueueRef.current.push(errorResponse);
+      if (!isProcessingQueueRef.current) {
+        processAnalysisQueue();
+      }
+      return;
+    }
+    
+    if (!cameraVideoRef.current) {
+      console.error('🎭 Camera video element not available');
+      const errorResponse = "I can't access the camera feed right now. Please make sure the camera is working properly.";
+      analysisQueueRef.current.push(errorResponse);
+      if (!isProcessingQueueRef.current) {
+        processAnalysisQueue();
+      }
+      return;
+    }
+    
+    // Capture current frame for analysis
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      console.error('🎭 Could not get canvas context');
+      return;
+    }
+    
+    // Wait a moment for video to be ready
+    if (cameraVideoRef.current.videoWidth === 0 || cameraVideoRef.current.videoHeight === 0) {
+      console.log('🎭 Video not ready yet, waiting...');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    if (cameraVideoRef.current.videoWidth === 0 || cameraVideoRef.current.videoHeight === 0) {
+      console.error('🎭 Video dimensions still not available');
+      const errorResponse = "I can't see the camera feed properly. The video might not be ready yet.";
+      analysisQueueRef.current.push(errorResponse);
+      if (!isProcessingQueueRef.current) {
+        processAnalysisQueue();
+      }
+      return;
+    }
+    
+    canvas.width = cameraVideoRef.current.videoWidth;
+    canvas.height = cameraVideoRef.current.videoHeight;
+    ctx.drawImage(cameraVideoRef.current, 0, 0);
+    
+    // Convert to base64 for OpenAI Vision API
+    const imageData = canvas.toDataURL('image/jpeg', 0.8);
+    
+    console.log('Image data:', imageData);
+    // Analyze with OpenAI Vision using conversational approach
+    const response = await createApiCall(
+      async () => {
+        const stream = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            {
+              role: "system",
+              content: `You are a helpful, hilarious AI assistant that analyzes images in a natural, conversational and funny way. When someone asks you about what you see, respond as if you're having a normal conversation with them. Be friendly, descriptive, and helpful. Keep responses conversational and under 150 words.`
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `The user asked: "${userQuestion}". Please analyze this image and respond naturally to their question. Describe what you see in a conversational way that directly answers their question.`
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: imageData
+                  }
+                }
+              ]
+            }
+          ],
+          max_tokens: 400,
+          stream: true
+        });
+        
+        // Process the stream and return the full response
+        let fullResponse = '';
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) {
+            fullResponse += content;
+          }
+        }
+        return { choices: [{ message: { content: fullResponse } }] } as any;
+      },
+      { timeout: 45000, retries: 2 }
+    );
+    
+    const analysis = response.choices[0].message.content || '';
+    
+    // Add the analysis to the queue for avatar speech
+    if (analysis.trim()) {
+      console.log('👁️ Adding vision analysis to queue:', analysis.trim());
+      analysisQueueRef.current.push(analysis.trim());
+      console.log('👁️ Queue length after adding:', analysisQueueRef.current.length);
+      console.log('👁️ Is processing queue:', isProcessingQueueRef.current);
+      console.log('👁️ Avatar speaking:', isAvatarSpeakingRef.current);
+      
+      if (!isProcessingQueueRef.current) {
+        console.log('👁️ Starting queue processing...');
+        processAnalysisQueue();
+      } else {
+        console.log('👁️ Queue is already processing, will process when current item finishes');
+      }
+    }
+    
+    console.log('👁️ Vision analysis response:', analysis);
+    
+  } catch (error) {
+    console.error('Error analyzing vision:', error);
+  } finally {
+    setIsAnalyzing(false);
+  }
+};
+
+// When the user selects the pre-defined prompts, this useEffect will get triggered
+useEffect(() => {
+  if (selectedPrompt) {
+    // Build messages array with conversation history and media context
+    const messages: any[] = [];
+    
+    // Always add system prompt first
+    messages.push({
+      role: 'system',
+      content: 'You are an intelligent, conversational AI assistant with a warm and engaging personality. Think of yourself as a knowledgeable friend who loves to chat and explore ideas together. Be genuinely curious, ask thoughtful questions, and show real interest in what the user is sharing. When discussing images or media, be specific about what you notice and ask engaging follow-up questions. Use natural language patterns, show personality, and make the conversation flow smoothly. Be helpful, insightful, and encouraging. Keep responses conversational and under 150 words, but don\'t be afraid to show enthusiasm and intelligence.'
+    });
+    
+    // Add media analysis if available (check both state and ref)
+    const effectiveMediaContext = hasMediaContext || mediaContextRef.current.hasContext;
+    const effectiveAnalysis = currentMediaAnalysis || mediaContextRef.current.analysis;
+    const effectiveFileName = mediaFileName || mediaContextRef.current.fileName;
+    
+    if (effectiveMediaContext && effectiveAnalysis && effectiveFileName) {
+      console.log('🎯 Media context is active for button!', { 
+        hasMediaContext, 
+        mediaFileName, 
+        currentMediaAnalysis,
+        refContext: mediaContextRef.current
+      });
+      
+      // Create a more natural, conversational context message
+      const fileType = effectiveFileName.split('.').pop()?.toLowerCase();
+      const mediaType = fileType && ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileType) ? 'image' :
+                       fileType && ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(fileType) ? 'video' :
+                       fileType && ['txt', 'pdf', 'doc', 'docx'].includes(fileType) ? 'document' : 'file';
+      
+      // Create more natural, ChatGPT-like context messages
+      const contextPrompts = [
+        `I just took a look at your ${mediaType} "${effectiveFileName}" - this is really interesting! ${effectiveAnalysis}\n\nI'm curious, what drew you to this ${mediaType}? What would you like to explore about it?`,
+        `Your ${mediaType} "${effectiveFileName}" caught my attention! Here's what I'm seeing: ${effectiveAnalysis}\n\nWhat aspects are you most interested in discussing?`,
+        `I've been examining your ${mediaType} "${effectiveFileName}" and I'm genuinely impressed. ${effectiveAnalysis}\n\nWhat questions do you have about it? I'd love to dive deeper into whatever interests you most.`,
+        `This ${mediaType} "${effectiveFileName}" is fascinating! ${effectiveAnalysis}\n\nWhat made you choose this particular ${mediaType}? I'm excited to explore it with you.`,
+        `I just finished analyzing your ${mediaType} "${effectiveFileName}" and wow, there's a lot to unpack here! ${effectiveAnalysis}\n\nWhat would you like to focus on? I'm here to help you understand or explore any aspect that interests you.`,
+        `Your ${mediaType} "${effectiveFileName}" is really compelling! ${effectiveAnalysis}\n\nI'm genuinely curious - what's your connection to this? What would you like to know more about?`,
+        `I've been studying your ${mediaType} "${effectiveFileName}" and I'm finding it quite engaging. ${effectiveAnalysis}\n\nWhat sparked your interest in this? I'd love to hear your thoughts and explore it together.`,
+        `This ${mediaType} "${effectiveFileName}" is quite something! ${effectiveAnalysis}\n\nWhat aspects are you most curious about? I'm here to help you understand or discuss whatever interests you most.`
+      ];
+      
+      const randomContextPrompt = contextPrompts[Math.floor(Math.random() * contextPrompts.length)];
+      messages.push({
+        role: 'assistant',
+        content: randomContextPrompt
+      });
+    } else {
+      console.log('❌ No media context for button', { 
+        hasMediaContext, 
+        mediaFileName, 
+        currentMediaAnalysis,
+        refContext: mediaContextRef.current
+      });
+    }
+    
+    // Add conversation history
+    messages.push(...conversationHistory);
+    
+    // Add current user message
+    messages.push({ role: 'user', content: selectedPrompt });
+    
+    createApiCall(
+      () => openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: messages,
+        max_tokens: 400, // Reduced for faster response
+        temperature: 0.8
+      }),
+      { timeout: 20000, retries: 2 }
+    ).then((aiResponse: any) => {
+      setInput(aiResponse.choices[0].message.content || '');
+      console.log("INPUT", input);
+    }).catch(error => {
+      console.log(error);
+    })
+  }
+}, [selectedPrompt, hasMediaContext, currentMediaAnalysis, mediaFileName])
+
+
+// When the stream gets the data, The avatar video will gets played
+useEffect(() => {
+  if (stream && mediaStream.current) {
+    console.log('Setting up video stream:', stream);
+    console.log('Video element:', mediaStream.current);
+    
+    mediaStream.current.srcObject = stream;
+    
+    // Handle video loading and playing for mobile compatibility
+    const handleLoadedMetadata = () => {
+      console.log('Video metadata loaded');
+      if (mediaStream.current) {
+        // Set maximum volume for avatar audio
+        mediaStream.current.volume = 1.0;
+        mediaStream.current.muted = false;
+        
+        // Set up audio context for volume boost
+        setupAudioContext();
+        
+        // Create a hidden audio element for volume boosting
+        if (!audioElementRef.current) {
+          audioElementRef.current = document.createElement('audio');
+          audioElementRef.current.style.display = 'none';
+          audioElementRef.current.volume = Math.min(volumeLevel, 1.0);
+          document.body.appendChild(audioElementRef.current);
+        }
+        
+        // Connect video audio to gain node for volume boost
+        if (audioContextRef.current && gainNodeRef.current && mediaStream.current) {
+          try {
+            // Resume audio context if suspended
+            if (audioContextRef.current.state === 'suspended') {
+              audioContextRef.current.resume();
+            }
+            
+            const source = audioContextRef.current.createMediaElementSource(mediaStream.current);
+            source.connect(gainNodeRef.current);
+            console.log('Audio connected to gain node for volume boost');
+          } catch (error) {
+            console.warn('Could not connect audio to gain node:', error);
+            // Fallback: just set video volume higher
+            mediaStream.current.volume = Math.min(volumeLevel, 1.0);
+          }
+        }
+        
+        mediaStream.current.play().catch(error => {
+          console.error('Autoplay failed:', error);
+          // Try to play with user interaction
+          document.addEventListener('touchstart', () => {
             if (mediaStream.current) {
               mediaStream.current.play().catch(console.error);
             }
-          }, 50);
-        }
+          }, { once: true });
+        });
       }
-    }
-  };
+    };
 
-  // Function to handle video area click for autoplay
-  const handleVideoClick = async () => {
-    if (videoNeedsInteraction && mediaStream.current) {
-      try {
-        await mediaStream.current.play();
-        setVideoNeedsInteraction(false);
-        console.log('Video started playing after user interaction');
-      } catch (error) {
-        console.error('Error playing video after interaction:', error);
+    const handleCanPlay = () => {
+      console.log('Video can play');
+    };
+
+    const handleError = (error: any) => {
+      console.error('Video error:', error);
+    };
+
+    mediaStream.current.addEventListener('loadedmetadata', handleLoadedMetadata);
+    mediaStream.current.addEventListener('canplay', handleCanPlay);
+    mediaStream.current.addEventListener('error', handleError);
+
+    // Cleanup function
+    return () => {
+      if (mediaStream.current) {
+        mediaStream.current.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        mediaStream.current.removeEventListener('canplay', handleCanPlay);
+        mediaStream.current.removeEventListener('error', handleError);
       }
-    }
-  };
-
-  // Show avatar test if enabled
-  if (showAvatarTest) {
-    return (
-      <>
-        <Toaster />
-        <div className="min-h-screen bg-gray-100">
-          <div className="fixed top-4 left-4 z-50">
-            <button
-              onClick={() => setShowAvatarTest(false)}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
-            >
-              Back to App
-            </button>
-          </div>
-          <AvatarTest />
-        </div>
-      </>
-    );
+    };
   }
+}, [stream]);
 
+// Set up small avatar video stream when camera is active
+useEffect(() => {
+  if (isCameraActive && stream && smallAvatarRef.current) {
+    console.log('Setting up small avatar video stream');
+    smallAvatarRef.current.srcObject = stream;
+    
+    const handleSmallAvatarLoadedMetadata = () => {
+      console.log('Small avatar video metadata loaded');
+      if (smallAvatarRef.current) {
+        
+        smallAvatarRef.current.play().catch(error => {
+          console.error('Small avatar autoplay failed:', error);
+        });
+      }
+    };
+
+    const handleSmallAvatarError = (error: any) => {
+      console.error('Small avatar video error:', error);
+    };
+
+    smallAvatarRef.current.addEventListener('loadedmetadata', handleSmallAvatarLoadedMetadata);
+    smallAvatarRef.current.addEventListener('error', handleSmallAvatarError);
+
+    // Cleanup function
+    return () => {
+      if (smallAvatarRef.current) {
+        smallAvatarRef.current.removeEventListener('loadedmetadata', handleSmallAvatarLoadedMetadata);
+        smallAvatarRef.current.removeEventListener('error', handleSmallAvatarError);
+      }
+    };
+  }
+}, [isCameraActive, stream]);
+
+// Show landing page if session hasn't started
+if (!isSessionStarted && !startLoading && !startAvatarLoading) {
   return (
     <>
-      <Toaster />
-      <div className="min-h-screen bg-black">
-        {/* Header - Fixed at top, mobile responsive */}
-        <div className="fixed top-0 left-0 right-0 w-full bg-transparent backdrop-blur-sm z-30">
-          <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
-            <div className="flex justify-between items-center">
-              <div className="flex-1 text-center">
-                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems.ai – beta</h1>
-                <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Main Content Area - Full width video container */}
-        <div className="w-full h-screen">
-          {/* Video Container - Full screen */}
-          <div className="relative w-full h-full">
-            
-            <Video
-              ref={mediaStream}
-              className={
-                `opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''} ` +
-                (isVisionMode
-                  ? 'fixed top-2 left-2 sm:top-4 sm:left-4 w-20 h-28 sm:w-24 sm:h-32 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
-                  : '')
-              }
-              onClick={() => handleVideoClick()}
-            />
-
-            {/* Click to play overlay when video needs interaction */}
-
-            {/* Start Chat indicator removed per requirements */}
-
-
-            {/* Control buttons - visible after session starts (avatar running) */}
-            {(isAvatarFullScreen && isAvatarRunning) && (
-              <>
-                {/* Paper clip and Camera buttons - adjustable design */}
-                <div 
-                  className="absolute inset-x-0 bottom-[20%] z-20 flex justify-center"
-                  style={{
-                    transform: `translateY(${designSettings.cameraButton.position.top}rem)`,
-                    gap: `${designSettings.buttonGap}rem`
-                  }}
-                >
-                  {/* Camera Button */}
-                  <button
-                    onClick={async () => {
-                      try {
-                        // Default to rear-facing camera (environment)
-                        const stream = await navigator.mediaDevices.getUserMedia({
-                          video: { facingMode: 'environment' }
-                        });
-                        setVisionCameraStream(stream);
-                        visionCameraStreamRef.current = stream; // Also update ref
-                        setCameraFacingMode('environment'); // Reset to rear-facing when opening
-                        setIsVisionMode(true);
-                        isVisionModeRef.current = true; // Also update ref
-                      } catch (error) {
-                        console.error('Error accessing camera:', error);
-                        // Fallback to front-facing if rear-facing fails
-                        try {
-                          const stream = await navigator.mediaDevices.getUserMedia({
-                            video: { facingMode: 'user' }
-                          });
-                          setVisionCameraStream(stream);
-                          visionCameraStreamRef.current = stream; // Also update ref
-                          setCameraFacingMode('user');
-                          setIsVisionMode(true);
-                          isVisionModeRef.current = true; // Also update ref
-                        } catch (fallbackError) {
-                          console.error('Error accessing camera (fallback):', fallbackError);
-                          toast({
-                            variant: "destructive",
-                            title: "Camera Error",
-                            description: "Could not access camera. Please check permissions.",
-                          });
-                        }
-                      }
-                    }}
-                    disabled={isAiProcessing}
-                    className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
-                    style={{
-                      opacity: designSettings.cameraButton.opacity,
-                      backgroundColor: designSettings.cameraButton.color,
-                      width: `${designSettings.cameraButton.size * 1.2}px`,
-                      height: `${designSettings.cameraButton.size}px`,
-                      transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`,
-                      borderRadius: '9999px'
-                    }}
-                    title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
-                  >
-                    <svg 
-                      className="text-white" 
-                      style={{ width: '20px', height: '20px' }}
-                      fill="none" 
-                      stroke="currentColor" 
-                      viewBox="0 0 24 24"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                  </button>
-
-                  {/* Paper Clip Button */}
-                  <button
-                    onClick={async () => {
-                      // On mobile (especially iOS), video recording is blocked if any media stream
-                      // (audio or video) is active, as iOS treats it as an "active call".
-                      // We must stop ALL active media streams before opening the file picker.
-                      
-                      // 1. Stop speech recognition (which may have active audio tracks)
-                      if (speechService.current && speechService.current.isActive()) {
-                        console.log('Stopping speech recognition to allow video recording...');
-                        speechService.current.stopListening();
-                      }
-                      
-                      // 2. Stop vision camera stream (video tracks)
-                      if (visionCameraStream) {
-                        console.log('Stopping vision camera stream to allow video recording...');
-                        visionCameraStream.getTracks().forEach(t => t.stop());
-                        setVisionCameraStream(null);
-                        visionCameraStreamRef.current = null; // Also update ref
-                        setIsVisionMode(false);
-                        isVisionModeRef.current = false; // Also update ref
-                      }
-                      
-                      // 3. Stop any active tracks from video elements
-                      if (visionVideoRef.current?.srcObject) {
-                        const stream = visionVideoRef.current.srcObject as MediaStream;
-                        stream.getTracks().forEach(t => t.stop());
-                        visionVideoRef.current.srcObject = null;
-                      }
-                      
-                      // Small delay to ensure all streams are fully stopped before opening picker
-                      // iOS needs this delay to properly release the camera/microphone
-                      setTimeout(() => {
-                        fileInputRef.current?.click();
-                      }, 200);
-                    }}
-                    disabled={isAiProcessing}
-                    className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
-                    style={{
-                      opacity: designSettings.paperClipButton.opacity,
-                      backgroundColor: designSettings.paperClipButton.color,
-                      width: `${designSettings.paperClipButton.size * 1.2}px`,
-                      height: `${designSettings.paperClipButton.size}px`,
-                      transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`,
-                      borderRadius: '9999px'
-                    }}
-                    title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
-                  >
-                    <svg 
-                      className="text-white" 
-                      style={{ width: '20px', height: '20px' }}
-                      fill="none" 
-                      stroke="currentColor" 
-                      viewBox="0 0 24 24"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                    </svg>
-                  </button>
-                </div>
-
-                {/* Test Control Panel - appears when image is uploaded */}
-                {/* {latestMediaKey && mediaAnalyses[latestMediaKey]?.status === 'ready' && (
-                  <div className="absolute inset-x-0 top-1/2 translate-y-24 flex justify-center z-20">
-                    <div className="bg-white/95 backdrop-blur-sm rounded-xl p-4 shadow-2xl border border-white/30 max-w-md w-full mx-4">
-                      <div className="text-center mb-3">
-                        <h3 className="text-sm font-semibold text-gray-800">Test Image Questions</h3>
-                        <p className="text-xs text-gray-600 mt-1">Quick test buttons for paper clip</p>
-                      </div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          onClick={() => {
-                            if (!isAiProcessing) {
-                              handleSpeechResult('describe about the image');
-                            }
-                          }}
-                          disabled={isAiProcessing}
-                          className="px-4 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
-                        >
-                          Describe about the image
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (!isAiProcessing) {
-                              handleSpeechResult('what can you see in the image');
-                            }
-                          }}
-                          disabled={isAiProcessing}
-                          className="px-4 py-2.5 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
-                        >
-                          What can you see in the image
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (!isAiProcessing) {
-                              handleSpeechResult('what is the main thing in the image');
-                            }
-                          }}
-                          disabled={isAiProcessing}
-                          className="px-4 py-2.5 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-sm"
-                        >
-                          What is the main thing in the image
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )} */}
-                                    {/* Hidden file inputs for paper clip button */}
-                {/* General file input for photo library and file selection */}
-                {/* Note: On mobile, this shows native picker with options: Photo Library, Take Photo or Video, Choose Files */}
-                {/* Issue: When user selects "Take Photo or Video" → "Video", it might default to photo mode on some devices */}
-                {/* Fix: Remove 'multiple' for video recording compatibility and ensure proper video MIME type handling */}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*,video/*"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-
-              </>
-            )}
-          </div>
-
-        </div>
-
-        {/* Avatar Control Buttons - Only show Stop button when user has started chatting */}
-        {/* {isAvatarRunning && !startAvatarLoading && hasUserStartedChatting && (
-          <div className="fixed bottom-20 sm:bottom-24 left-1/2 transform -translate-x-1/2 z-30 lg:left-1/2 lg:transform-none lg:bottom-20">
-            <div className="flex gap-2 sm:gap-3">
-              <button
-                onClick={stopAvatarSpeech}
-                className="px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm lg:text-base shadow-lg hover:shadow-xl backdrop-blur-sm border border-white/20"
-              >
-                <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10h6v4H9z" />
-                </svg>
-                <span className="hidden sm:inline">Stop Talking</span>
-                <span className="sm:hidden">Stop</span>
-              </button>
-            </div>
-          </div>
-        )} */}
-
-        {/* Loading indicator when avatar is starting automatically */}
-        {startAvatarLoading && (
-          <div className="fixed bottom-20 sm:bottom-24 left-1/2 transform -translate-x-1/2 z-30 lg:left-1/2 lg:transform-none lg:bottom-20">
-            <div className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-xl font-semibold shadow-lg backdrop-blur-sm border border-white/20">
-              <Loader2 className="h-3 w-3 sm:h-4 sm:w-4 animate-spin" />
-              <span className="text-xs sm:text-sm lg:text-base">Starting Avatar...</span>
-            </div>
-          </div>
-        )}
-
-
-        {/* Vision Mode Camera - Fullscreen when in vision mode */}
-        {isVisionMode && (
-          <div className="fixed inset-0 z-40 bg-black">
-            <video
-              ref={visionVideoRef}
-              autoPlay
-              playsInline
-              className="w-full h-full object-cover"
-              style={{
-                transform: cameraFacingMode === 'user' ? 'scaleX(-1)' : 'none'
-              }}
-              muted
-              controls={false}
-            />
-            <div className="absolute top-4 right-4 flex gap-2">
-              {/* Camera Switch Button */}
-              <button
-                onClick={switchCamera}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
-                title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                </svg>
-              </button>
-              {/* Exit Button */}
-              <button
-                onClick={exitVisionMode}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
-                title="Exit Vision Mode"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            {/* What can you see button - Bottom center */}
-            {/* <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
-              <button
-                onClick={handleWhatCanYouSee}
-                disabled={isAiProcessing}
-                className={`px-8 py-3 shadow-lg transition-all duration-200 font-semibold text-sm sm:text-base ${
-                  isAiProcessing 
-                    ? 'bg-purple-400 cursor-not-allowed text-white' 
-                    : 'bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white'
-                }`}
-                style={{ borderRadius: '50px' }}
-                title={isAiProcessing ? 'Analyzing...' : 'What can you see right now?'}
-              >
-                {isAiProcessing ? (
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Analyzing...</span>
-                  </div>
-                ) : (
-                  'What can you see right now?'
-                )}
-              </button>
-            </div> */}
-            {/* <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2">
-            <button
-              onClick={() => {
-                // Trigger another vision analysis
-                if (mediaStream.current) {
-                  const canvas = document.createElement('canvas');
-                  const video = mediaStream.current;
-                  const context = canvas.getContext('2d');
-                  
-                  if (context) {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    context.drawImage(video, 0, 0);
-                    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                    handleVisionAnalysis(imageDataUrl);
-                  }
-                }
-              }}
-              disabled={isAiProcessing}
-              className={`shadow-lg transition-all duration-200 ${
-                isAiProcessing 
-                  ? 'bg-purple-400 cursor-not-allowed' 
-                  : 'bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white'
-              }`}
-              title={isAiProcessing ? 'Analyzing...' : 'Analyze Again'}
-            >
-              {isAiProcessing ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <FaEye size={16} />
-              )}
-            </button>
-          </div> */}
-          </div>
-        )}
-
-        {/* Design Panel */}
-        <DesignPanel
-          isOpen={showDesignPanel}
-          onClose={() => setShowDesignPanel(false)}
-          settings={designSettings}
-          onSettingsChange={setDesignSettings}
-        />
-
-      </div>
     </>
   );
 }
 
-export default App;
+return (
+  <>
+    <div 
+      className={`h-screen w-screen relative overflow-hidden transition-all duration-300 ${
+        isDragOver ? 'ring-4 ring-blue-400 ring-opacity-50 bg-blue-900/20' : ''
+      }`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Brand Header */}
+      <Suspense fallback={<div className="h-16 bg-gray-100 animate-pulse"></div>}>
+        <BrandHeader />
+      </Suspense>
 
+      {/* Fullscreen Video - Avatar or Camera */}
+      <div className="absolute inset-0 flex items-center justify-center bg-black">
+        {isCameraActive && cameraStream ? (
+          <Suspense fallback={<div className="w-full h-full bg-black flex items-center justify-center text-white">Loading camera...</div>}>
+            <CameraVideo
+              ref={cameraVideoRef}
+              stream={cameraStream}
+              onMotionDetected={handleMotionDetected}
+              onMotionStopped={handleMotionStopped}
+            />
+          </Suspense>
+        ) : (
+          <Video ref={mediaStream} />
+        )}
+        
+        {/* Avatar speaking indicator - main view */}
+        {!isCameraActive && isAvatarSpeaking && (
+          <div className="absolute top-4 left-4 z-30">
+            <div className="flex items-center space-x-2 bg-black/70 rounded-full px-3 py-2">
+              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse">
+                <div className="absolute inset-0 bg-green-400 rounded-full animate-ping"></div>
+              </div>
+              <span className="text-white text-sm font-medium">Avatar Speaking</span>
+            </div>
+          </div>
+        )}
+        
+        {/* User talking indicator */}
+        {isUserTalking && (
+          <div className="absolute top-4 right-4 z-30">
+            <div className="flex items-center space-x-2 bg-blue-600/70 rounded-full px-3 py-2">
+              <div className="w-3 h-3 bg-blue-400 rounded-full animate-pulse">
+                <div className="absolute inset-0 bg-blue-300 rounded-full animate-ping"></div>
+              </div>
+              <span className="text-white text-sm font-medium">You're Speaking</span>
+            </div>
+          </div>
+        )}
+        
+        {/* Camera vision ready indicator */}
+        {isCameraActive && cameraStream && (
+          <div className="absolute top-4 left-4 z-30">
+            <div className="flex items-center space-x-2 bg-green-600/70 rounded-full px-3 py-2">
+              <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse">
+                <div className="absolute inset-0 bg-green-300 rounded-full animate-ping"></div>
+              </div>
+              <span className="text-white text-sm font-medium">Vision Ready</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Small Avatar Video - Top Left Corner (when camera is active) */}
+      {isCameraActive && stream && (
+        <div className="absolute top-20 left-4 w-24 h-32 z-20 bg-black rounded-lg overflow-hidden shadow-lg">
+          <video 
+            ref={smallAvatarRef}
+            playsInline 
+            autoPlay 
+            loop
+            className="w-full h-full object-cover rounded-lg" 
+            style={{ 
+              backgroundColor: '#000'
+            }}
+          />
+        {/* Avatar speaking indicator */}
+        {isAvatarSpeaking && (
+          <div className="absolute top-1 right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse shadow-lg">
+            <div className="absolute inset-0 bg-green-400 rounded-full animate-ping"></div>
+          </div>
+        )}
+        
+        {/* User talking indicator for camera mode */}
+        {isUserTalking && (
+          <div className="absolute top-1 left-1 w-3 h-3 bg-blue-500 rounded-full animate-pulse shadow-lg">
+            <div className="absolute inset-0 bg-blue-400 rounded-full animate-ping"></div>
+          </div>
+        )}
+        </div>
+      )}
+
+      {/* Close button for camera mode */}
+      {isCameraActive && cameraStream && (
+        <button
+          onClick={handleCameraClick}
+          className="absolute top-4 right-4 w-8 h-8 bg-red-500/80 hover:bg-red-500 text-white rounded-full flex items-center justify-center text-lg font-bold transition-colors z-30"
+          title="Exit Vision Mode"
+        >
+          ×
+        </button>
+      )}
+
+      {/* Enhanced Loading overlay with progress */}
+      {(startLoading || startAvatarLoading) && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 z-20">
+          <div className="text-white text-center max-w-md mx-auto p-6">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-6"></div>
+            <div className="text-2xl mb-4">Getting my funny face ready...</div>
+            
+            
+            <div className="text-sm opacity-75">
+              {loadingProgress < 50 ? "Preparing jokes and witty comebacks!" : 
+               loadingProgress < 80 ? "Setting up the stage for comedy!" :
+               "Almost ready to entertain!"}
+            </div>
+            
+            <div className="text-xs mt-2 opacity-50">
+              {loadingProgress}% complete
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Avatar Control Panel - Top Right */}
+      {/* {isSessionStarted && (
+        <div className="absolute top-4 right-4 z-30 flex flex-col gap-2">
+          <div className="bg-black/70 rounded-lg p-2 flex flex-col gap-1">
+
+            <div className="text-xs text-white/70 mb-1">
+              Avatar: {isAvatarSpeaking ? 'Speaking' : 'Silent'} | User: {isUserTalking ? 'Talking' : 'Silent'}
+            </div>
+            <div className="text-xs text-white/50 mb-1">
+              Ref: {isAvatarSpeakingRef.current ? 'True' : 'False'} | Timer: {speakingTimerRef.current ? 'Active' : 'None'} | Audio: {audioDetectionRef.current ? 'Detecting' : 'Off'}
+            </div>
+            <button
+              onClick={() => startAvatarSpeaking("Hello! I'm ready to help you.")}
+              disabled={isAvatarSpeaking}
+              className={`px-3 py-1 text-xs rounded ${
+                isAvatarSpeaking 
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
+                  : 'bg-green-600 hover:bg-green-700 text-white'
+              }`}
+            >
+              Start Avatar
+            </button>
+            <button
+              onClick={stopAvatarSpeaking}
+              disabled={!isAvatarSpeaking}
+              className={`px-3 py-1 text-xs rounded ${
+                !isAvatarSpeaking 
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
+                  : 'bg-red-600 hover:bg-red-700 text-white'
+              }`}
+              title={isAvatarSpeaking ? 'Stop the avatar from speaking' : 'Avatar is not speaking'}
+            >
+              Stop Avatar {isAvatarSpeaking ? '✓' : '✗'}
+            </button>
+            <button
+              onClick={interruptAvatarSpeaking}
+              disabled={!isAvatarSpeaking}
+              className={`px-3 py-1 text-xs rounded ${
+                !isAvatarSpeaking 
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
+                  : 'bg-orange-600 hover:bg-orange-700 text-white'
+              }`}
+              title={isAvatarSpeaking ? 'Interrupt the avatar immediately' : 'Avatar is not speaking'}
+            >
+              Interrupt {isAvatarSpeaking ? '✓' : '✗'}
+            </button>
+            <button
+              onClick={() => {
+                console.log('🎭 Force stopping avatar - clearing all timers and state');
+                if (mediaStream.current) {
+                  mediaStream.current.muted = true;
+                  mediaStream.current.volume = 0;
+                  console.log('🎭 Avatar audio muted in force stop');
+                }
+                resetAvatarSpeakingState();
+              }}
+              className="px-3 py-1 text-xs rounded bg-purple-600 hover:bg-purple-700 text-white"
+              title="Force stop avatar (emergency override) - mutes audio"
+            >
+              Force Stop
+            </button>
+            <button
+              onClick={resetAvatarSpeakingState}
+              className="px-3 py-1 text-xs rounded bg-orange-600 hover:bg-orange-700 text-white"
+              title="Reset avatar speaking state (for stuck states)"
+            >
+              Reset State
+            </button>
+            <button
+              onClick={() => {
+                console.log('🎭 Unmuting avatar audio');
+                if (mediaStream.current) {
+                  mediaStream.current.muted = false;
+                  mediaStream.current.volume = 1.0;
+                  console.log('🎭 Avatar audio unmuted');
+                }
+              }}
+              className="px-3 py-1 text-xs rounded bg-cyan-600 hover:bg-cyan-700 text-white"
+              title="Unmute avatar audio"
+            >
+              Unmute
+            </button>
+          </div>
+        </div>
+      )} */}
+
+      {/* Camera and Paper clip buttons - positioned above avatar's hands */}
+      {isSessionStarted && (
+        <div className="absolute top-2/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex gap-4 z-20">
+          <Button
+            variant="outline"
+            size="icon"
+            className={`h-12 w-20 ${
+              isCameraActive 
+                ? 'bg-red-600/80 border-red-500 text-white hover:bg-red-700/80 shadow-lg' 
+                : 'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80 shadow-lg'
+            }`}
+            style={{
+              borderRadius: '50px',
+              border: '4px solid #8B4513',
+              borderTop: '4px solid #8B4513',
+              borderBottom: '4px solid #8B4513',
+              position: 'relative',
+              overflow: 'hidden'
+            }}
+            onClick={handleCameraClick}
+          >
+            <div 
+              style={{
+                position: 'absolute',
+                top: '-4px',
+                left: '-4px',
+                right: '-4px',
+                bottom: '-4px',
+                border: '2px solid #2D2D2D',
+                borderRadius: '50px',
+                pointerEvents: 'none'
+              }}
+            />
+            <div 
+              style={{
+                position: 'absolute',
+                top: '-2px',
+                left: '-2px',
+                right: '-2px',
+                bottom: '-2px',
+                border: '1px solid #C0C0C0',
+                borderRadius: '50px',
+                pointerEvents: 'none'
+              }}
+            />
+            <Camera className="h-6 w-6" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className={`h-12 w-20 shadow-lg transition-all duration-300 hover:scale-110 ${
+              hasMediaContext 
+                ? 'bg-green-600/80 border-green-500 text-white hover:bg-green-700/80' 
+                : 'bg-amber-700/80 border-amber-600 text-amber-100 hover:bg-amber-800/80'
+            }`}
+            style={{
+              borderRadius: '50px',
+              border: '4px solid #8B4513',
+              borderTop: '4px solid #8B4513',
+              borderBottom: '4px solid #8B4513',
+              position: 'relative',
+              overflow: 'hidden'
+            }}
+            onClick={() => {
+              const fileInput = document.createElement('input');
+              fileInput.type = 'file';
+              fileInput.accept = '.txt,.pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.mp4,.mov,.avi,.mkv,.webm';
+              fileInput.onchange = (e) => {
+                const file = (e.target as HTMLInputElement).files?.[0];
+                if (file) handleFileUpload(file);
+              };
+              fileInput.click();
+            }}
+            title={hasMediaContext ? `Currently analyzing: ${mediaFileName}` : "Upload a file to discuss"}
+          >
+            <div 
+              style={{
+                position: 'absolute',
+                top: '-4px',
+                left: '-4px',
+                right: '-4px',
+                bottom: '-4px',
+                border: '2px solid #2D2D2D',
+                borderRadius: '50px',
+                pointerEvents: 'none'
+              }}
+            />
+            <div 
+              style={{
+                position: 'absolute',
+                top: '-2px',
+                left: '-2px',
+                right: '-2px',
+                bottom: '-2px',
+                border: '1px solid #C0C0C0',
+                borderRadius: '50px',
+                pointerEvents: 'none'
+              }}
+            />
+            <Paperclip className={`h-6 w-6 transition-transform duration-200 ${hasMediaContext ? 'animate-pulse' : ''}`} />
+          </Button>
+        </div>
+      )}
+
+      {/* Controls overlay at bottom - only show after session starts */}
+      {isSessionStarted && (
+        <div className='absolute bottom-0 left-0 right-0 flex flex-col justify-center p-2 z-10'>
+          <div className="w-full max-w-4xl mx-auto">
+            <Suspense fallback={<div className="h-12 bg-gray-200 animate-pulse rounded-lg mb-4"></div>}>
+              <Badges
+                setSelectedPrompt={setSelectedPrompt}
+                onFileUpload={handleFileUpload}
+                onCameraClick={handleCameraClick}
+                isCameraActive={isCameraActive}
+                hasMediaContext={hasMediaContext}
+                mediaFileName={mediaFileName}
+                onClearContext={clearMediaContext}
+              />
+            </Suspense>
+            {/* <Suspense fallback={<div className="h-16 bg-gray-200 animate-pulse rounded-full"></div>}>
+              <MicButton
+                isSpeaking={isSpeaking}
+                onClick={isSpeaking ? handleStopSpeaking : handleStartSpeaking}
+                stopAvatar={stop}
+                grab={grab}
+                avatarStartLoading={startAvatarLoading}
+                avatarStopLoading={stopAvatarLoading}
+              />
+            </Suspense> */}
+          </div>
+        </div>
+      )}
+    </div>
+  </>
+);
+}
+
+export default App;
 
