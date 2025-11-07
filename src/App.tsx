@@ -1900,8 +1900,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
             <div className="flex justify-between items-center">
               <div className="flex-1 text-center">
-                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems.ai – beta</h1>
-                <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
+                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold" style={{ fontFamily: 'Bell MT, serif', color:"#ae9200" }}>iSolveUrProblems.ai – beta</h1>
+                <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif', color:"#ae9200" }}>Everything - except Murder</p>
               </div>
             </div>
           </div>
@@ -2256,7 +2256,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         {/* Loading indicator when avatar is starting automatically */}
         {startAvatarLoading && (
           <div className="fixed bottom-20 sm:bottom-24 left-1/2 transform -translate-x-1/2 z-30 lg:left-1/2 lg:transform-none lg:bottom-20">
-            <div className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-xl font-semibold shadow-lg backdrop-blur-sm border border-white/20">
+            <div className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 text-white rounded-xl font-semibold shadow-lg backdrop-blur-sm border border-white/20" style={{ backgroundColor: '#ae9200' }}>
               <Loader2 className="h-3 w-3 sm:h-4 sm:w-4 animate-spin" />
               <span className="text-xs sm:text-sm lg:text-base">Starting Avatar...</span>
             </div>
