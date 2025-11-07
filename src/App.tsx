@@ -5,7 +5,7 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 import { DesignPanel } from './components/reusable/DesignPanel';
@@ -2292,14 +2292,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  {/* Camera body */}
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                  {/* Camera lens */}
-                  <circle cx="12" cy="13" r="3" strokeLinecap="round" strokeLinejoin="round" />
-                  {/* Refresh/rotation arrow overlay - centered on camera */}
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 10a3.5 3.5 0 11-2.475 1.025M12 10l-1.5-1.5m1.5 1.5v2" />
-                </svg>
+                <RefreshCw className="w-5 h-5" />
               </button>
               {/* Exit Button */}
               <button
