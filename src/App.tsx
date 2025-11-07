@@ -1948,7 +1948,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       fontWeight: 'bold'
                     }}
                   >
-                    <div>Please...</div>
+                    <div style={{ transform: 'translateX(-1.0em)' }}>Please...</div>
                     <div>Be patient with 6</div>
                   </div>
                 </div>
