@@ -68,7 +68,7 @@ function App() {
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
   const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
-  const [textColor, setTextColor] = useState<string>('#000000'); // Default black color
+  const [textColor, setTextColor] = useState<string>('#ae9200'); // Default color
   const [showColorSettings, setShowColorSettings] = useState<boolean>(false);
   
   // Design settings for mobile buttons
@@ -1951,7 +1951,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       fontFamily: 'Lobster, cursive',
                       color: textColor,
                       fontSize: "2rem",
-                      lineHeight: '1.2'
+                      lineHeight: '1.2',
+                      fontWeight: 'bold'
                     }}
                   >
                     <div>Please...</div>
@@ -2298,8 +2299,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  {/* Camera body */}
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  {/* Camera lens */}
+                  <circle cx="12" cy="13" r="3" strokeLinecap="round" strokeLinejoin="round" />
+                  {/* Refresh/rotation arrow overlay - circular arrow in center-right */}
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 7.5a4.5 4.5 0 11-3.182 1.273M16.5 7.5l-1.5-1.5m1.5 1.5v2.25" />
                 </svg>
               </button>
               {/* Exit Button */}
@@ -2441,7 +2447,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       fontFamily: 'Lobster, cursive',
                       color: textColor,
                       fontSize: '1.5rem',
-                      lineHeight: '1.2'
+                      lineHeight: '1.2',
+                      fontWeight: 'bold'
                     }}
                   >
                     <div>Please...</div>
