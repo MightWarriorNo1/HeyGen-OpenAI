@@ -2304,8 +2304,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                   {/* Camera lens */}
                   <circle cx="12" cy="13" r="3" strokeLinecap="round" strokeLinejoin="round" />
-                  {/* Refresh/rotation arrow overlay - circular arrow in center-right */}
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 7.5a4.5 4.5 0 11-3.182 1.273M16.5 7.5l-1.5-1.5m1.5 1.5v2.25" />
+                  {/* Refresh/rotation arrow overlay - centered on camera */}
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 10a3.5 3.5 0 11-2.475 1.025M12 10l-1.5-1.5m1.5 1.5v2" />
                 </svg>
               </button>
               {/* Exit Button */}
