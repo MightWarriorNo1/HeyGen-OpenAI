@@ -5,7 +5,7 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2, Settings } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 import { DesignPanel } from './components/reusable/DesignPanel';
@@ -75,7 +75,7 @@ function App() {
   const [designSettings, setDesignSettings] = useState({
     cameraButton: {
       opacity: 0.8,
-      color: '#BC7300',
+      color: '#ae9200',
       size: 48, // p-3 = 12px padding on each side, so ~48px total
       position: {
         top: 0, // translate-y-8 = 2rem from center
@@ -84,7 +84,7 @@ function App() {
     },
     paperClipButton: {
       opacity: 0.8,
-      color: '#BC7300',
+      color: '#ae9200',
       size: 48,
       position: {
         top: 0,
@@ -1903,13 +1903,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems.ai – beta</h1>
                 <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
               </div>
-              <button
-                onClick={() => setShowColorSettings(true)}
-                className="p-2 text-white hover:bg-white/10 rounded-lg transition-colors"
-                title="Text Color Settings"
-              >
-                <Settings className="w-5 h-5 sm:w-6 sm:h-6" />
-              </button>
             </div>
           </div>
         </div>
@@ -2294,7 +2287,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   width: `${designSettings.cameraButton.size * 1.2}px`,
                   height: `${designSettings.cameraButton.size}px`,
                   borderRadius: '9999px',
-                  backgroundColor: '#BC7300',
+                  backgroundColor: '#ae9200',
                   opacity: 0.8
                 }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
@@ -2316,7 +2309,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   width: `${designSettings.cameraButton.size * 1.2}px`,
                   height: `${designSettings.cameraButton.size}px`,
                   borderRadius: '9999px',
-                  backgroundColor: '#BC7300',
+                  backgroundColor: '#ae9200',
                   opacity: 0.8
                 }}
                 title="Exit Vision Mode"
