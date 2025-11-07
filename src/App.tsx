@@ -91,23 +91,12 @@ function App() {
         left: 0
       }
     },
-    micButton: {
-      color: '#3b82f6',
-      hoverColor: '#2563eb',
-      size: 56
-    },
     buttonGap: 1,
     textColors: {
       userMessage: '#ffffff',
       assistantMessage: '#ffffff',
       header: '#ae9200',
       buttonText: '#ffffff'
-    },
-    messageBubbles: {
-      userBackground: '#3b82f6',
-      userBackgroundGradient: '#2563eb',
-      assistantBackground: '#6b7280',
-      assistantBackgroundGradient: '#4b5563'
     },
     fonts: {
       family: 'Arial, sans-serif',
@@ -129,10 +118,6 @@ function App() {
     },
     positions: {
       header: {
-        top: 0,
-        left: 0
-      },
-      chatArea: {
         top: 0,
         left: 0
       }
