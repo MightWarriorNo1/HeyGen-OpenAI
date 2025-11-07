@@ -5,10 +5,10 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Loader2, RefreshCw, Settings } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
-import { DesignPanel } from './components/reusable/DesignPanel';
+import { DesignPanel, DesignSettings } from './components/reusable/DesignPanel';
 
 interface ChatMessageType {
   role: string;
@@ -71,14 +71,14 @@ function App() {
   const [textColor, setTextColor] = useState<string>('#ae9200'); // Default color
   const [showColorSettings, setShowColorSettings] = useState<boolean>(false);
   
-  // Design settings for mobile buttons
-  const [designSettings, setDesignSettings] = useState({
+  // Comprehensive design settings
+  const [designSettings, setDesignSettings] = useState<DesignSettings>({
     cameraButton: {
       opacity: 0.8,
       color: '#ae9200',
-      size: 48, // p-3 = 12px padding on each side, so ~48px total
+      size: 48,
       position: {
-        top: 0, // translate-y-8 = 2rem from center
+        top: 0,
         left: 0
       }
     },
@@ -91,7 +91,52 @@ function App() {
         left: 0
       }
     },
-    buttonGap: 1 // gap-4 = 1rem
+    micButton: {
+      color: '#3b82f6',
+      hoverColor: '#2563eb',
+      size: 56
+    },
+    buttonGap: 1,
+    textColors: {
+      userMessage: '#ffffff',
+      assistantMessage: '#ffffff',
+      header: '#ae9200',
+      buttonText: '#ffffff'
+    },
+    messageBubbles: {
+      userBackground: '#3b82f6',
+      userBackgroundGradient: '#2563eb',
+      assistantBackground: '#6b7280',
+      assistantBackgroundGradient: '#4b5563'
+    },
+    fonts: {
+      family: 'Arial, sans-serif',
+      size: 16,
+      weight: 400,
+      lineHeight: 1.5
+    },
+    layout: {
+      messagePadding: 16,
+      messageBorderRadius: 24,
+      messageMaxWidth: 70,
+      messageSpacing: 8,
+      avatarSize: 32,
+      headerPadding: 16
+    },
+    backgrounds: {
+      page: '#000000',
+      header: 'transparent'
+    },
+    positions: {
+      header: {
+        top: 0,
+        left: 0
+      },
+      chatArea: {
+        top: 0,
+        left: 0
+      }
+    }
   });
   const [chatMessages, setChatMessages] = useState<ChatMessageType[]>([
     // {
@@ -1894,15 +1939,48 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   return (
     <>
       <Toaster />
-      <div className="min-h-screen bg-black">
+      <div className="min-h-screen" style={{ backgroundColor: designSettings.backgrounds.page }}>
         {/* Header - Fixed at top, mobile responsive */}
-        <div className="fixed top-0 left-0 right-0 w-full bg-transparent backdrop-blur-sm z-30">
+        <div 
+          className="fixed top-0 left-0 right-0 w-full backdrop-blur-sm z-30"
+          style={{
+            backgroundColor: designSettings.backgrounds.header,
+            transform: `translate(${designSettings.positions.header.left}rem, ${designSettings.positions.header.top}rem)`,
+            padding: `${designSettings.layout.headerPadding}px`
+          }}
+        >
           <div className="container mx-auto px-2 sm:px-4 py-2 sm:py-4">
             <div className="flex justify-between items-center">
               <div className="flex-1 text-center">
-                <h1 className="text-lg sm:text-xl lg:text-2xl font-bold" style={{ fontFamily: 'Bell MT, serif', color:"#ae9200" }}>iSolveUrProblems.ai – beta</h1>
-                <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif', color:"#ae9200" }}>Everything - except Murder</p>
+                <h1 
+                  className="text-lg sm:text-xl lg:text-2xl font-bold" 
+                  style={{ 
+                    fontFamily: designSettings.fonts.family, 
+                    color: designSettings.textColors.header,
+                    fontWeight: designSettings.fonts.weight
+                  }}
+                >
+                  iSolveUrProblems.ai – beta
+                </h1>
+                <p 
+                  className="text-[11px] sm:text-xs mt-0.5" 
+                  style={{ 
+                    fontFamily: designSettings.fonts.family, 
+                    color: designSettings.textColors.header,
+                    opacity: 0.8
+                  }}
+                >
+                  Everything - except Murder
+                </p>
               </div>
+              <button
+                onClick={() => setShowDesignPanel(true)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                title="Open Design Panel"
+                style={{ color: designSettings.textColors.header }}
+              >
+                <Settings className="w-5 h-5" />
+              </button>
             </div>
           </div>
         </div>
@@ -1941,11 +2019,11 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   <div 
                     className="text-center"
                     style={{ 
-                      fontFamily: 'Lobster, cursive',
-                      color: textColor,
-                      fontSize: "2rem",
-                      lineHeight: '1.2',
-                      fontWeight: 'bold'
+                      fontFamily: designSettings.fonts.family,
+                      color: designSettings.textColors.buttonText,
+                      fontSize: `${designSettings.fonts.size * 1.25}px`,
+                      lineHeight: designSettings.fonts.lineHeight,
+                      fontWeight: designSettings.fonts.weight
                     }}
                   >
                     <div style={{ transform: 'translateX(-1.0em)' }}>Please...</div>
@@ -2043,13 +2121,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       width: `${designSettings.cameraButton.size * 1.2}px`,
                       height: `${designSettings.cameraButton.size}px`,
                       transform: `translate(${designSettings.cameraButton.position.left}rem, 0)`,
-                      borderRadius: '9999px'
+                      borderRadius: '9999px',
+                      color: designSettings.textColors.buttonText
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Open vision mode'}
                   >
                     <svg 
-                      className="text-white" 
-                      style={{ width: '20px', height: '20px' }}
+                      style={{ width: '20px', height: '20px', color: designSettings.textColors.buttonText }}
                       fill="none" 
                       stroke="currentColor" 
                       viewBox="0 0 24 24"
@@ -2153,13 +2231,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       width: `${designSettings.paperClipButton.size * 1.2}px`,
                       height: `${designSettings.paperClipButton.size}px`,
                       transform: `translate(${designSettings.paperClipButton.position.left}rem, 0)`,
-                      borderRadius: '9999px'
+                      borderRadius: '9999px',
+                      color: designSettings.textColors.buttonText
                     }}
                     title={isAiProcessing ? 'AI is processing...' : 'Upload images or videos'}
                   >
                     <svg 
-                      className="text-white" 
-                      style={{ width: '20px', height: '20px' }}
+                      style={{ width: '20px', height: '20px', color: designSettings.textColors.buttonText }}
                       fill="none" 
                       stroke="currentColor" 
                       viewBox="0 0 24 24"
