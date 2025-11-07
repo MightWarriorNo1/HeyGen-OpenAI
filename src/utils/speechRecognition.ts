@@ -737,6 +737,12 @@ export class SpeechRecognitionService {
     }
     // Stop the audio stream to release the microphone
     // This is critical on iOS where active media streams block video recording
+    this.forceStopAudioStream();
+  }
+
+  // Force stop audio stream - useful when we need to ensure microphone is released
+  // (e.g., before opening camera/video picker on mobile)
+  public forceStopAudioStream(): void {
     if (this.audioStream) {
       this.audioStream.getTracks().forEach(track => {
         track.stop();

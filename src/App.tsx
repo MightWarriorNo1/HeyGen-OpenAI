@@ -5,7 +5,7 @@ import { Configuration, NewSessionData, StreamingAvatarApi } from '@heygen/strea
 import { getAccessToken } from './services/api';
 import { Video } from './components/reusable/Video';
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from 'lucide-react';
+import { Loader2, Settings } from 'lucide-react';
 import { SpeechRecognitionService } from './utils/speechRecognition';
 import AvatarTest from './components/reusable/AvatarTest';
 import { DesignPanel } from './components/reusable/DesignPanel';
@@ -68,11 +68,13 @@ function App() {
   const [videoNeedsInteraction, setVideoNeedsInteraction] = useState<boolean>(false);
   const [showAvatarTest, setShowAvatarTest] = useState<boolean>(false);
   const [showDesignPanel, setShowDesignPanel] = useState<boolean>(false);
+  const [textColor, setTextColor] = useState<string>('#000000'); // Default black color
+  const [showColorSettings, setShowColorSettings] = useState<boolean>(false);
   
   // Design settings for mobile buttons
   const [designSettings, setDesignSettings] = useState({
     cameraButton: {
-      opacity: 1,
+      opacity: 0.8,
       color: '#BC7300',
       size: 48, // p-3 = 12px padding on each side, so ~48px total
       position: {
@@ -81,7 +83,7 @@ function App() {
       }
     },
     paperClipButton: {
-      opacity: 1,
+      opacity: 0.8,
       color: '#BC7300',
       size: 48,
       position: {
@@ -542,7 +544,7 @@ INSTRUCTIONS:
         ];
 
         const aiResponse = await openai.chat.completions.create({
-          model: 'grok-2-latest',
+          model: 'grok-2-vision',
           messages: messagesForAnswer,
           temperature: 0.8,
           max_tokens: 400
@@ -598,7 +600,7 @@ REMEMBER:
       })();
 
       const aiResponse = await openai.chat.completions.create({
-        model: 'grok-2-latest',
+        model: 'grok-2-vision',
         messages: [
           {
             role: 'system',
@@ -701,11 +703,11 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to handle speech recognition errors
   const handleSpeechError = (error: string) => {
     console.error('Speech recognition error:', error);
-    toast({
-      variant: "destructive",
-      title: "Speech Recognition Error",
-      description: error,
-    });
+    // toast({
+    //   variant: "destructive",
+    //   title: "Speech Recognition Error",
+    //   description: error,
+    // });
     setIsListening(false);
   };
 
@@ -717,22 +719,26 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       setHasUserStartedChatting(true);
 
       const newFiles = Array.from(files);
+      const validFiles: Array<{ file: File; fileType: 'photo' | 'video' }> = [];
+      const maxVideoSize = 25 * 1024 * 1024; // 25MB in bytes
 
-      // Process each file and add to chat immediately
+      // Process each file and validate
       newFiles.forEach(file => {
         // Detect file type more accurately
-        // Check MIME type first, then fall back to extension
+        // Check both MIME type and extension to be thorough
+        const fileName = file.name.toLowerCase();
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+        const videoExtensions = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
+        
         let fileType: 'photo' | 'video' | null = null;
-        if (file.type.startsWith('image/')) {
+        
+        // Check MIME type first
+        if (file.type && file.type.startsWith('image/')) {
           fileType = 'photo';
-        } else if (file.type.startsWith('video/')) {
+        } else if (file.type && file.type.startsWith('video/')) {
           fileType = 'video';
         } else {
           // Fallback: check file extension
-          const fileName = file.name.toLowerCase();
-          const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
-          const videoExtensions = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'];
-          
           if (imageExtensions.some(ext => fileName.endsWith(ext))) {
             fileType = 'photo';
           } else if (videoExtensions.some(ext => fileName.endsWith(ext))) {
@@ -740,7 +746,34 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           }
         }
 
+        // Validate video file size (max 25MB) - check if it's a video by extension or MIME type
+        const isVideoByMime = file.type && file.type.startsWith('video/');
+        const isVideoByExtension = videoExtensions.some(ext => fileName.endsWith(ext));
+        const isVideo = fileType === 'video' || isVideoByMime || isVideoByExtension;
+        
+        if (isVideo) {
+          if (file.size > maxVideoSize) {
+            toast({
+              title: "File too large",
+              description: `Video file "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)}MB) exceeds the maximum size of 25MB. Please choose a smaller file.`,
+              variant: "destructive",
+            });
+            return; // Skip processing this file
+          }
+          // Ensure fileType is set to video if we detected it
+          if (!fileType) {
+            fileType = 'video';
+          }
+        }
+
         if (fileType) {
+          validFiles.push({ file, fileType });
+        }
+      });
+
+      // Process only valid files
+      if (validFiles.length > 0) {
+        validFiles.forEach(({ file, fileType }) => {
           const mediaKey = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
           // Track latest media for future context
           setLatestMediaKey(mediaKey);
@@ -769,25 +802,28 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
 
           // Analyze in background (no immediate reply)
           void processMediaWithAI(file, fileType, mediaKey);
-        }
-      });
+        });
 
-      // Clear the input
-      event.target.value = '';
+        // Clear the input
+        event.target.value = '';
 
-      toast({
-        title: "Upload received",
-        description: `${newFiles.length} file(s) queued for analysis`,
-      });
+        toast({
+          title: "Upload received",
+          description: `${validFiles.length} file(s) queued for analysis`,
+        });
 
-      // Inform user that analysis is underway
-      const analyzingText = newFiles.length === 1
-        ? `I'm analyzing right now. Please wait until Analysis is finished  ...`
-        : `I'm analyzing your files now. Please wait until Analysis is finished...`;
-      setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
-      // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
-      speechService.current?.suspend(analyzingText);
-      setAvatarSpeech(analyzingText);
+        // Inform user that analysis is underway
+        const analyzingText = validFiles.length === 1
+          ? `I'm analyzing right now. Please wait until Analysis is finished  ...`
+          : `I'm analyzing your files now. Please wait until Analysis is finished...`;
+        setChatMessages(prev => [...prev, { role: 'assistant', message: analyzingText }]);
+        // CRITICAL: Suspend speech recognition BEFORE setting avatar speech to prevent it from capturing avatar's voice
+        speechService.current?.suspend(analyzingText);
+        setAvatarSpeech(analyzingText);
+      } else {
+        // Clear the input even if no valid files
+        event.target.value = '';
+      }
     }
   };
 
@@ -799,6 +835,176 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       reader.readAsDataURL(file);
       reader.onload = () => resolve(reader.result as string);
       reader.onerror = error => reject(error);
+    });
+  };
+
+  // Function to extract frames from video file
+  const extractVideoFrames = async (file: File, frameCount: number = 3): Promise<string[]> => {
+    return new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      if (!ctx) {
+        reject(new Error('Could not get canvas context'));
+        return;
+      }
+
+      video.preload = 'metadata';
+      video.muted = true;
+      video.playsInline = true;
+      
+      const frames: string[] = [];
+      let videoUrl: string | null = null;
+
+      video.onerror = () => {
+        if (videoUrl) URL.revokeObjectURL(videoUrl);
+        reject(new Error('Error loading video'));
+      };
+
+      const captureFrame = (time: number, duration: number): Promise<void> => {
+        return new Promise((resolveFrame) => {
+          const seekHandler = () => {
+            try {
+              // Ensure minimum pixel count for xAI Vision
+              const MIN_PIXELS = 1024;
+              const vw = video.videoWidth;
+              const vh = video.videoHeight;
+              
+              if (vw === 0 || vh === 0) {
+                video.removeEventListener('seeked', seekHandler);
+                resolveFrame();
+                return;
+              }
+              
+              const pixels = vw * vh;
+              const scale = pixels < MIN_PIXELS ? Math.sqrt(MIN_PIXELS / Math.max(pixels, 1)) : 1;
+              const cw = Math.max(2, Math.floor(vw * scale));
+              const ch = Math.max(2, Math.floor(vh * scale));
+              
+              canvas.width = cw;
+              canvas.height = ch;
+              ctx.imageSmoothingEnabled = true;
+              ctx.drawImage(video, 0, 0, cw, ch);
+              
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+              frames.push(dataUrl);
+              
+              video.removeEventListener('seeked', seekHandler);
+              resolveFrame();
+            } catch (error) {
+              console.error('Error capturing frame:', error);
+              video.removeEventListener('seeked', seekHandler);
+              resolveFrame();
+            }
+          };
+
+          video.addEventListener('seeked', seekHandler, { once: true });
+          
+          try {
+            const targetTime = Math.min(Math.max(0, time), Math.max(0.1, duration - 0.1));
+            video.currentTime = targetTime;
+          } catch {
+            video.removeEventListener('seeked', seekHandler);
+            resolveFrame();
+          }
+        });
+      };
+
+      video.onloadedmetadata = async () => {
+        try {
+          const duration = video.duration;
+          
+          if (!duration || duration === 0 || !isFinite(duration)) {
+            // If duration not available, try to capture at current time
+            await new Promise(resolve => setTimeout(resolve, 200));
+            try {
+              const vw = video.videoWidth;
+              const vh = video.videoHeight;
+              if (vw > 0 && vh > 0) {
+                const MIN_PIXELS = 1024;
+                const pixels = vw * vh;
+                const scale = pixels < MIN_PIXELS ? Math.sqrt(MIN_PIXELS / Math.max(pixels, 1)) : 1;
+                const cw = Math.max(2, Math.floor(vw * scale));
+                const ch = Math.max(2, Math.floor(vh * scale));
+                
+                canvas.width = cw;
+                canvas.height = ch;
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(video, 0, 0, cw, ch);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                if (videoUrl) URL.revokeObjectURL(videoUrl);
+                resolve([dataUrl]);
+              } else {
+                if (videoUrl) URL.revokeObjectURL(videoUrl);
+                reject(new Error('Could not extract video frames - invalid dimensions'));
+              }
+            } catch {
+              if (videoUrl) URL.revokeObjectURL(videoUrl);
+              reject(new Error('Could not extract video frames'));
+            }
+            return;
+          }
+
+          // Calculate frame times (beginning, middle, end)
+          const targetTimes: number[] = [];
+          if (frameCount === 1) {
+            targetTimes.push(duration / 2); // Middle frame
+          } else {
+            for (let i = 0; i < frameCount; i++) {
+              targetTimes.push((duration / (frameCount + 1)) * (i + 1));
+            }
+          }
+
+          // Wait for video to be ready
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          // Capture frames at different times
+          for (const time of targetTimes) {
+            await captureFrame(time, duration);
+          }
+          
+          // If we got at least one frame, resolve with what we have
+          if (frames.length > 0) {
+            if (videoUrl) URL.revokeObjectURL(videoUrl);
+            resolve(frames);
+          } else {
+            // Fallback: try to capture at current time
+            try {
+              const vw = video.videoWidth;
+              const vh = video.videoHeight;
+              if (vw > 0 && vh > 0) {
+                const MIN_PIXELS = 1024;
+                const pixels = vw * vh;
+                const scale = pixels < MIN_PIXELS ? Math.sqrt(MIN_PIXELS / Math.max(pixels, 1)) : 1;
+                const cw = Math.max(2, Math.floor(vw * scale));
+                const ch = Math.max(2, Math.floor(vh * scale));
+                
+                canvas.width = cw;
+                canvas.height = ch;
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(video, 0, 0, cw, ch);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                if (videoUrl) URL.revokeObjectURL(videoUrl);
+                resolve([dataUrl]);
+              } else {
+                if (videoUrl) URL.revokeObjectURL(videoUrl);
+                reject(new Error('Could not extract video frames'));
+              }
+            } catch {
+              if (videoUrl) URL.revokeObjectURL(videoUrl);
+              reject(new Error('Could not extract video frames'));
+            }
+          }
+        } catch (error) {
+          if (videoUrl) URL.revokeObjectURL(videoUrl);
+          reject(error);
+        }
+      };
+
+      // Create object URL for video
+      videoUrl = URL.createObjectURL(file);
+      video.src = videoUrl;
     });
   };
 
@@ -903,7 +1109,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           }));
 
           aiResponse = await openai.chat.completions.create({
-            model: 'grok-2-latest',
+            model: 'grok-2-vision',
             messages: [
               {
                 role: 'system' as const,
@@ -944,14 +1150,98 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           });
         }
       } else {
-        // For videos, use text-only model (no vision support for videos yet)
+        // For videos, extract frames and analyze them with vision model (same as images)
+        try {
+          // Extract frames from video (beginning, middle, end)
+          const videoFrames = await extractVideoFrames(file, 3);
+          
+          if (videoFrames.length === 0) {
+            throw new Error('Could not extract frames from video');
+          }
+
+          // Build conversation history for vision
+          const conversationHistory = chatMessages.map(msg => ({
+            role: msg.role as 'user' | 'assistant',
+            content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
+          }));
+
+          // Create content array with text and all video frames
+          const contentArray: any[] = [
+            {
+              type: 'text' as const,
+              text: `I've shared a video file named "${file.name}". I've extracted ${videoFrames.length} representative frames from different parts of the video. Please analyze what you can see in these frames and provide helpful insights about the video content.`
+            }
+          ];
+
+          // Add all extracted frames to the content array
+          for (const frameDataUrl of videoFrames) {
+            contentArray.push({
+              type: 'image_url' as const,
+              image_url: { url: frameDataUrl, detail: 'high' as const }
+            });
+          }
+
+          const messages = [
+            {
+              role: 'system' as const,
+              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+
+PERSONALITY TRAITS:
+- Crack jokes, puns, and witty observations constantly
+- Use self-deprecating humor and playful sarcasm
+- Make pop culture references and clever wordplay
+- Be genuinely helpful while being absolutely hilarious
+- React to images/videos with funny commentary
+- Remember EVERYTHING from the conversation (text, images, videos, vision data)
+- Build on previous jokes and references throughout the conversation
+
+VISION ANALYSIS:
+- When analyzing images/videos, make hilarious observations about what you see
+- Point out funny details, absurd situations, or comedic elements
+- Use your vision analysis to crack jokes while being genuinely helpful
+- Reference previous images/videos in the conversation for running gags
+- For videos, analyze the frames provided and describe what's happening in the video
+- Note any changes or progression between frames if multiple frames are provided
+
+CONVERSATION MEMORY:
+- Remember all previous messages, images, videos, and vision analysis
+- Reference past conversation elements in your responses
+- Build running jokes and callbacks
+- Acknowledge when you're seeing something new vs. referencing something old
+
+RESPONSE STYLE:
+- Start responses with a funny observation or joke when appropriate
+- Use emojis sparingly but effectively for comedic timing
+- Vary your humor style (puns, observational comedy, absurdist humor)
+- Keep responses helpful but entertaining
+- If someone shares media, react with humor while being genuinely helpful
+
+Remember: You're not just solving problems, you're putting on a comedy show while being genuinely useful!`
+            },
+            ...conversationHistory,
+            {
+              role: 'user' as const,
+              content: contentArray
+            }
+          ];
+
+          aiResponse = await openai.chat.completions.create({
+            model: 'grok-2-vision',
+            messages: messages,
+            temperature: 0.8,
+            max_tokens: 400
+          } as any);
+
+        } catch (visionError) {
+          console.warn('Video frame extraction/analysis failed, falling back to text-only:', visionError);
+          // Fallback to text-only analysis if frame extraction fails
         const conversationHistory = chatMessages.map(msg => ({
           role: msg.role as 'user' | 'assistant',
           content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
         }));
 
         aiResponse = await openai.chat.completions.create({
-          model: 'grok-2-latest',
+          model: 'grok-2-vision',
           messages: [
             {
               role: 'system' as const,
@@ -984,12 +1274,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             ...conversationHistory,
             {
               role: 'user' as const,
-              content: `I've shared a video file named "${file.name}" (${file.type}, ${Math.round(file.size / 1024)}KB). Could you please describe what's in the video or what you'd like help with? I'm here to assist with any questions or analysis you need.`
+                content: `I've shared a video file named "${file.name}" (${file.type}, ${Math.round(file.size / 1024)}KB). I tried to analyze the video frames but encountered an issue. Could you please describe what's in the video or what you'd like help with? I'm here to assist with any questions or analysis you need.`
             }
           ],
           temperature: 0.8,
           max_tokens: 400
         });
+        }
       }
       const aiMessage = aiResponse.choices[0].message.content || '';
       // Store analysis in background store
@@ -1612,6 +1903,13 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-white" style={{ fontFamily: 'Bell MT, serif' }}>iSolveUrProblems.ai – beta</h1>
                 <p className="text-[11px] sm:text-xs text-white/80 mt-0.5" style={{ fontFamily: 'Bell MT, serif' }}>Everything - except Murder</p>
               </div>
+              <button
+                onClick={() => setShowColorSettings(true)}
+                className="p-2 text-white hover:bg-white/10 rounded-lg transition-colors"
+                title="Text Color Settings"
+              >
+                <Settings className="w-5 h-5 sm:w-6 sm:h-6" />
+              </button>
             </div>
           </div>
         </div>
@@ -1626,7 +1924,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               className={
                 `opacity-100 transition-all duration-300 ${videoNeedsInteraction ? 'cursor-pointer' : ''} ` +
                 (isVisionMode
-                  ? 'fixed top-2 left-2 sm:top-4 sm:left-4 w-20 h-28 sm:w-24 sm:h-32 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
+                  ? 'fixed top-2 left-2 sm:top-4 sm:left-4 w-40 h-56 sm:w-48 sm:h-64 z-50 rounded-lg overflow-hidden border-2 border-white/30 shadow-2xl'
                   : '')
               }
               onClick={() => handleVideoClick()}
@@ -1640,6 +1938,27 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             {/* Control buttons - visible after session starts (avatar running) */}
             {(isAvatarFullScreen && isAvatarRunning) && (
               <>
+                {/* Text above buttons */}
+                <div 
+                  className="absolute inset-x-0 bottom-[20%] z-20 flex flex-col items-center justify-center p-4"
+                  style={{
+                    transform: `translateY(${designSettings.cameraButton.position.top - 3}rem)`,
+                  }}
+                >
+                  <div 
+                    className="text-center"
+                    style={{ 
+                      fontFamily: 'Lobster, cursive',
+                      color: textColor,
+                      fontSize: "2rem",
+                      lineHeight: '1.2'
+                    }}
+                  >
+                    <div>Please...</div>
+                    <div>Be patient with 6</div>
+                  </div>
+                </div>
+
                 {/* Paper clip and Camera buttons - adjustable design */}
                 <div 
                   className="absolute inset-x-0 bottom-[20%] z-20 flex justify-center"
@@ -1651,6 +1970,45 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Camera Button */}
                   <button
                     onClick={async () => {
+                      // Interrupt avatar if it's currently speaking (including during initial greeting)
+                      // User explicitly clicked camera button, so always interrupt
+                      if (isAvatarSpeakingRef.current) {
+                        console.log('📸 Camera button clicked - interrupting avatar...');
+                        
+                        // CRITICAL: Set cancellation flag FIRST to stop ongoing speak() function
+                        shouldCancelSpeechRef.current = true;
+                        
+                        // CRITICAL: Clear avatar speech state (synchronously) to prevent new speech
+                        setAvatarSpeech('');
+                        isAvatarSpeakingRef.current = false;
+                        
+                        // Clear initial greeting flag if it was active (user clicked camera, greeting is done)
+                        if (isInitialGreetingRef.current) {
+                          isInitialGreetingRef.current = false;
+                        }
+                        
+                        // CRITICAL: Actually CALL and AWAIT the interrupt - don't just fire and forget
+                        try {
+                          // Use sessionId from ref (always current), fallback to ref data, then state
+                          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
+                          
+                          if (avatar.current && currentSessionId) {
+                            console.log('📞 Interrupting avatar with sessionId:', currentSessionId);
+                            await avatar.current.interrupt({
+                              interruptRequest: {
+                                sessionId: currentSessionId
+                              }
+                            });
+                            console.log('✅ Avatar interrupted successfully');
+                          } else {
+                            console.warn('⚠️ Cannot interrupt - avatar or sessionId not available');
+                          }
+                        } catch (err: any) {
+                          console.error('❌ Interrupt API call failed:', err);
+                          // Even if interrupt fails, we've cleared the state and set cancel flag
+                        }
+                      }
+                      
                       try {
                         // Default to rear-facing camera (environment)
                         const stream = await navigator.mediaDevices.getUserMedia({
@@ -1714,16 +2072,25 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       // (audio or video) is active, as iOS treats it as an "active call".
                       // We must stop ALL active media streams before opening the file picker.
                       
+                      console.log('Stopping all media streams to allow video recording...');
+                      
                       // 1. Stop speech recognition (which may have active audio tracks)
-                      if (speechService.current && speechService.current.isActive()) {
-                        console.log('Stopping speech recognition to allow video recording...');
+                      // Always stop, even if not active, to ensure any lingering streams are cleared
+                      if (speechService.current) {
+                        console.log('Stopping speech recognition...');
                         speechService.current.stopListening();
+                        // Force stop audio stream as well to ensure microphone is fully released
+                        // This is critical on iOS where any active audio stream blocks video recording
+                        speechService.current.forceStopAudioStream();
                       }
                       
                       // 2. Stop vision camera stream (video tracks)
                       if (visionCameraStream) {
-                        console.log('Stopping vision camera stream to allow video recording...');
-                        visionCameraStream.getTracks().forEach(t => t.stop());
+                        console.log('Stopping vision camera stream...');
+                        visionCameraStream.getTracks().forEach(t => {
+                          t.stop();
+                          console.log(`Stopped track: ${t.kind} (${t.label})`);
+                        });
                         setVisionCameraStream(null);
                         visionCameraStreamRef.current = null; // Also update ref
                         setIsVisionMode(false);
@@ -1733,15 +2100,56 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       // 3. Stop any active tracks from video elements
                       if (visionVideoRef.current?.srcObject) {
                         const stream = visionVideoRef.current.srcObject as MediaStream;
-                        stream.getTracks().forEach(t => t.stop());
+                        stream.getTracks().forEach(t => {
+                          t.stop();
+                          console.log(`Stopped video element track: ${t.kind} (${t.label})`);
+                        });
                         visionVideoRef.current.srcObject = null;
                       }
                       
-                      // Small delay to ensure all streams are fully stopped before opening picker
+                      // 4. Enumerate and stop ALL active local media tracks on the device
+                      // This is a comprehensive cleanup to ensure nothing is left running
+                      // We skip the avatar video element to avoid stopping the remote HeyGen stream
+                      try {
+                        const allTracks: MediaStreamTrack[] = [];
+                        
+                        // Get all tracks from all video/audio elements in the document
+                        // Skip the avatar video element (mediaStream.current) as it contains remote tracks
+                        document.querySelectorAll('video, audio').forEach((element: Element) => {
+                          // Skip avatar video element
+                          if (element === mediaStream.current) {
+                            return;
+                          }
+                          
+                          const mediaElement = element as HTMLVideoElement | HTMLAudioElement;
+                          if (mediaElement.srcObject) {
+                            const stream = mediaElement.srcObject as MediaStream;
+                            stream.getTracks().forEach(track => {
+                              // Only stop tracks that are live (active)
+                              // Local tracks from getUserMedia will be live when active
+                              if (track.readyState === 'live') {
+                                allTracks.push(track);
+                              }
+                            });
+                          }
+                        });
+                        
+                        // Stop all found active tracks
+                        allTracks.forEach(track => {
+                          track.stop();
+                          console.log(`Stopped enumerated track: ${track.kind} (${track.label})`);
+                        });
+                      } catch (error) {
+                        console.warn('Error enumerating media tracks:', error);
+                      }
+                      
+                      // 6. Additional delay to ensure all streams are fully stopped before opening picker
                       // iOS needs this delay to properly release the camera/microphone
-                      setTimeout(() => {
-                        fileInputRef.current?.click();
-                      }, 200);
+                      // Increased delay for better reliability on iOS devices
+                      await new Promise(resolve => setTimeout(resolve, 500));
+                      
+                      console.log('All media streams stopped, opening file picker...');
+                      fileInputRef.current?.click();
                     }}
                     disabled={isAiProcessing}
                     className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
@@ -1880,8 +2288,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Camera Switch Button */}
               <button
                 onClick={switchCamera}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
+                style={{ 
+                  width: `${designSettings.cameraButton.size * 1.2}px`,
+                  height: `${designSettings.cameraButton.size}px`,
+                  borderRadius: '9999px',
+                  backgroundColor: '#BC7300',
+                  opacity: 0.8
+                }}
                 title={cameraFacingMode === 'environment' ? 'Switch to selfie mode' : 'Switch to rear camera'}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1891,8 +2305,14 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               {/* Exit Button */}
               <button
                 onClick={exitVisionMode}
-                className="flex items-center justify-center text-white shadow-lg transition-all duration-200"
-                style={{ padding: '12px 18px', borderRadius: '50%', backgroundColor: '#BC7300' }}
+                className="flex items-center justify-center text-white shadow-lg transition-all duration-200 border border-white/20"
+                style={{ 
+                  width: `${designSettings.cameraButton.size * 1.2}px`,
+                  height: `${designSettings.cameraButton.size}px`,
+                  borderRadius: '9999px',
+                  backgroundColor: '#BC7300',
+                  opacity: 0.8
+                }}
                 title="Exit Vision Mode"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1966,6 +2386,72 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           settings={designSettings}
           onSettingsChange={setDesignSettings}
         />
+
+        {/* Color Settings Modal */}
+        {showColorSettings && (
+          <div 
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center"
+            onClick={() => setShowColorSettings(false)}
+          >
+            <div 
+              className="bg-white rounded-lg p-6 max-w-sm w-full mx-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold text-gray-800">Text Color Settings</h2>
+                <button
+                  onClick={() => setShowColorSettings(false)}
+                  className="text-gray-500 hover:text-gray-700 transition-colors"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Choose Text Color
+                  </label>
+                  <div className="flex items-center gap-4">
+                    <input
+                      type="color"
+                      value={textColor}
+                      onChange={(e) => setTextColor(e.target.value)}
+                      className="w-20 h-20 rounded-lg border-2 border-gray-300 cursor-pointer"
+                    />
+                    <div className="flex-1">
+                      <input
+                        type="text"
+                        value={textColor}
+                        onChange={(e) => setTextColor(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="#000000"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="pt-4 border-t border-gray-200">
+                  <p className="text-sm text-gray-600 mb-2">Preview:</p>
+                  <div 
+                    className="text-center p-4 rounded-lg bg-gray-50"
+                    style={{ 
+                      fontFamily: 'Lobster, cursive',
+                      color: textColor,
+                      fontSize: '1.5rem',
+                      lineHeight: '1.2'
+                    }}
+                  >
+                    <div>Please...</div>
+                    <div>Be patient with 6</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </>
