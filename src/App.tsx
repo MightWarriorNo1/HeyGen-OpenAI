@@ -1775,23 +1775,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         setStartAvatarLoading(false);
         setIsAvatarRunning(true);
         // Greet the user after stream and session are ready
-        setTimeout(() => {
-          if (sessionId || newSessionId) {
-            // CRITICAL: Stop speech recognition completely before greeting to prevent it from capturing avatar's voice
-            // This is more reliable than suspend() - we don't want any recognition running during initial greeting
-            const greetingText = 'Hello, I am 6, your personal assistant. How can I help you today?';
-            if (speechService.current) {
-              console.log('Stopping speech recognition completely before greeting...');
-              speechService.current.stopListening();
-              // Also suspend to mark that avatar will be speaking, pass greeting text for echo detection
-              speechService.current.suspend(greetingText);
-            }
-            // Mark this as initial greeting to protect it from interruption
-            isInitialGreetingRef.current = true;
-            console.log('👋 Starting initial greeting...');
-            setAvatarSpeech(greetingText);
-          }
-        }, 1500);
+        // setTimeout(() => {
+        //   if (sessionId || newSessionId) {
+        //     const greetingText = 'Hello, I am 6, your personal assistant. How can I help you today?';
+        //     if (speechService.current) {
+        //       console.log('Stopping speech recognition completely before greeting...');
+        //       speechService.current.stopListening();
+        //       speechService.current.suspend(greetingText);
+        //     }
+        //     isInitialGreetingRef.current = true;
+        //     console.log('👋 Starting initial greeting...');
+        //     setAvatarSpeech(greetingText);
+        //   }
+        // }, 1500);
         console.log('Avatar started successfully');
 
         // Try to play immediately after a micro delay to ensure DOM is updated
