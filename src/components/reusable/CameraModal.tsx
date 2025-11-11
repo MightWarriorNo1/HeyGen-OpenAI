@@ -27,7 +27,6 @@ const CameraModal = ({ isOpen, onClose, onCapture, onVisionAnalysis, onVisionSta
     } else {
       stopCamera();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   const startCamera = async () => {
@@ -60,14 +59,7 @@ const CameraModal = ({ isOpen, onClose, onCapture, onVisionAnalysis, onVisionSta
       videoRef.current.srcObject = mediaStream;
       // Ensure playback starts on some browsers
       videoRef.current.onloadedmetadata = () => {
-        try { 
-          if (videoRef.current) {
-            videoRef.current.play();
-          }
-        } catch (err) {
-          // Ignore play errors (e.g., autoplay restrictions)
-          console.debug('Video play error (ignored):', err);
-        }
+        try { videoRef.current && videoRef.current.play(); } catch {}
       };
     }
   };
@@ -108,15 +100,20 @@ const CameraModal = ({ isOpen, onClose, onCapture, onVisionAnalysis, onVisionSta
 
   const startVideoRecording = async () => {
     if (stream) {
-      // Record video-only to avoid conflicts when microphone is already in use
-      // (e.g., during a call or when speech recognition is active)
-      // This prevents the "Recording video is not available while on a call" error
-      
-      // Remove any existing audio tracks to ensure video-only recording
-      stream.getAudioTracks().forEach(track => {
-        track.stop();
-        stream.removeTrack(track);
-      });
+      // Add audio track only when recording starts, if not already present
+      const hasAudio = stream.getAudioTracks().length > 0;
+      if (!hasAudio) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const audioTrack = audioStream.getAudioTracks()[0];
+          if (audioTrack) {
+            stream.addTrack(audioTrack);
+          }
+        } catch (err) {
+          // If audio is not available, continue with video-only recording
+          console.warn('Audio not available for recording:', err);
+        }
+      }
 
       let mediaRecorder: MediaRecorder;
       try {
