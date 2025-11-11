@@ -40,6 +40,8 @@ function App() {
   const avatar = useRef<StreamingAvatarApi | null>(null);
   const speechService = useRef<SpeechRecognitionService | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isMediaCaptureActive, setIsMediaCaptureActive] = useState<boolean>(false);
+  const isMediaCaptureActiveRef = useRef<boolean>(false);
   // Store background media analysis results keyed by a generated mediaKey
   const [, setMediaAnalyses] = useState<Record<string, {
     type: 'photo' | 'video';
@@ -193,6 +195,29 @@ function App() {
     setIsAvatarFullScreen(true);
   }, []);
 
+  useEffect(() => {
+    const resetMediaCaptureFlag = () => {
+      if (isMediaCaptureActiveRef.current) {
+        isMediaCaptureActiveRef.current = false;
+        setIsMediaCaptureActive(false);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        resetMediaCaptureFlag();
+      }
+    };
+
+    window.addEventListener('focus', resetMediaCaptureFlag);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('focus', resetMediaCaptureFlag);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
   // Set up vision camera video when stream is available
   useEffect(() => {
     if (visionCameraStream && visionVideoRef.current) {
@@ -219,6 +244,10 @@ function App() {
   // Function to handle speech recognition
   const handleStartListening = async () => {
     console.log('handleStartListening called', { speechService: !!speechService.current, isListening, isAiProcessing });
+    if (isMediaCaptureActiveRef.current) {
+      console.log('Skipping speech recognition start - media capture in progress');
+      return;
+    }
     if (speechService.current && !isListening && !isAiProcessing) {
       try {
         console.log('Starting speech recognition...');
@@ -744,6 +773,9 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to handle file uploads
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
+    isMediaCaptureActiveRef.current = false;
+    setIsMediaCaptureActive(false);
+
     if (files) {
       // Mark that user has started chatting
       setHasUserStartedChatting(true);
@@ -1440,6 +1472,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
     return () => {
       if (speechService.current) {
         speechService.current.stopListening();
+        setIsListening(false);
       }
     };
   }, []);
@@ -1447,11 +1480,18 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Auto-start continuous listening when avatar is running
   // BUT: Don't start until initial greeting is complete (to avoid interfering with greeting)
   useEffect(() => {
-    if (isAvatarRunning && speechService.current && !isListening && !isAiProcessing && !isInitialGreetingRef.current) {
+    if (
+      isAvatarRunning &&
+      speechService.current &&
+      !isListening &&
+      !isAiProcessing &&
+      !isInitialGreetingRef.current &&
+      !isMediaCaptureActiveRef.current
+    ) {
       console.log('Auto-starting continuous speech recognition...');
       handleStartListening();
     }
-  }, [isAvatarRunning, isListening, isAiProcessing]);
+  }, [isAvatarRunning, isListening, isAiProcessing, isMediaCaptureActive]);
 
   // Periodic check to ensure speech recognition stays active
   // BUT: Don't start/restart during initial greeting
@@ -1468,7 +1508,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             !isAiProcessing && 
             !isInitialGreetingRef.current &&
             !isAvatarSpeakingRef.current &&
-            !speechService.current.isInGracePeriod()) {
+            !speechService.current.isInGracePeriod() &&
+            !isMediaCaptureActiveRef.current) {
           console.log('Speech recognition not active, restarting...');
           speechService.current.forceRestart();
         } else if (speechService.current && !speechService.current.isActive()) {
@@ -1481,13 +1522,15 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             console.log('⚠️ Skipping restart - avatar is speaking');
           } else if (speechService.current.isInGracePeriod()) {
             console.log('⚠️ Skipping restart - in grace period after avatar stopped');
+          } else if (isMediaCaptureActiveRef.current) {
+            console.log('⚠️ Skipping restart - media capture in progress');
           }
         }
       }, 5000); // Check every 5 seconds
 
       return () => clearInterval(checkInterval);
     }
-  }, [isAvatarRunning, isAiProcessing]);
+  }, [isAvatarRunning, isAiProcessing, isMediaCaptureActive]);
 
 
   // useEffect getting triggered when the avatarSpeech state is updated, basically make the avatar to talk
@@ -2023,75 +2066,99 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Camera Button */}
                   <button
                     onClick={async () => {
-                      // Interrupt avatar if it's currently speaking (including during initial greeting)
-                      // User explicitly clicked camera button, so always interrupt
-                      if (isAvatarSpeakingRef.current) {
-                        console.log('📸 Camera button clicked - interrupting avatar...');
-                        
-                        // CRITICAL: Set cancellation flag FIRST to stop ongoing speak() function
-                        shouldCancelSpeechRef.current = true;
-                        
-                        // CRITICAL: Clear avatar speech state (synchronously) to prevent new speech
-                        setAvatarSpeech('');
-                        isAvatarSpeakingRef.current = false;
-                        
-                        // Clear initial greeting flag if it was active (user clicked camera, greeting is done)
-                        if (isInitialGreetingRef.current) {
-                          isInitialGreetingRef.current = false;
-                        }
-                        
-                        // CRITICAL: Actually CALL and AWAIT the interrupt - don't just fire and forget
-                        try {
-                          // Use sessionId from ref (always current), fallback to ref data, then state
-                          const currentSessionId = sessionIdRef.current || dataRef.current?.sessionId || sessionId;
-                          
-                          if (avatar.current && currentSessionId) {
-                            console.log('📞 Interrupting avatar with sessionId:', currentSessionId);
-                            await avatar.current.interrupt({
-                              interruptRequest: {
-                                sessionId: currentSessionId
-                              }
-                            });
-                            console.log('✅ Avatar interrupted successfully');
-                          } else {
-                            console.warn('⚠️ Cannot interrupt - avatar or sessionId not available');
-                          }
-                        } catch (err: any) {
-                          console.error('❌ Interrupt API call failed:', err);
-                          // Even if interrupt fails, we've cleared the state and set cancel flag
-                        }
+                      console.log('Preparing to open media picker...');
+
+                      const fileInput = fileInputRef.current;
+                      if (!fileInput) {
+                        console.warn('File input not available.');
+                        return;
                       }
-                      
+
+                      isMediaCaptureActiveRef.current = true;
+                      setIsMediaCaptureActive(true);
+
                       try {
-                        // Default to rear-facing camera (environment)
-                        const stream = await navigator.mediaDevices.getUserMedia({
-                          video: { facingMode: 'environment' }
-                        });
-                        setVisionCameraStream(stream);
-                        visionCameraStreamRef.current = stream; // Also update ref
-                        setCameraFacingMode('environment'); // Reset to rear-facing when opening
-                        setIsVisionMode(true);
-                        isVisionModeRef.current = true; // Also update ref
-                      } catch (error) {
-                        console.error('Error accessing camera:', error);
-                        // Fallback to front-facing if rear-facing fails
-                        try {
-                          const stream = await navigator.mediaDevices.getUserMedia({
-                            video: { facingMode: 'user' }
-                          });
-                          setVisionCameraStream(stream);
-                          visionCameraStreamRef.current = stream; // Also update ref
-                          setCameraFacingMode('user');
-                          setIsVisionMode(true);
-                          isVisionModeRef.current = true; // Also update ref
-                        } catch (fallbackError) {
-                          console.error('Error accessing camera (fallback):', fallbackError);
-                          toast({
-                            variant: "destructive",
-                            title: "Camera Error",
-                            description: "Could not access camera. Please check permissions.",
-                          });
+                        // On mobile (especially iOS), video recording is blocked if any media stream
+                        // (audio or video) is active, as iOS treats it as an "active call".
+                        // We must stop ALL active media streams before opening the file picker.
+                        console.log('Stopping all media streams to allow video recording...');
+
+                        // 1. Stop speech recognition (which may have active audio tracks)
+                        if (speechService.current) {
+                          console.log('Stopping speech recognition...');
+                          try {
+                            await speechService.current.stopListening();
+                          } catch (err) {
+                            console.warn('Error stopping speech recognition (ignored):', err);
+                          }
+                          speechService.current.forceStopAudioStream();
+                          setIsListening(false);
                         }
+
+                        // 2. Stop vision camera stream (video tracks)
+                        if (visionCameraStream) {
+                          console.log('Stopping vision camera stream...');
+                          visionCameraStream.getTracks().forEach(t => {
+                            t.stop();
+                            console.log(`Stopped track: ${t.kind} (${t.label})`);
+                          });
+                          setVisionCameraStream(null);
+                          visionCameraStreamRef.current = null; // Also update ref
+                          setIsVisionMode(false);
+                          isVisionModeRef.current = false; // Also update ref
+                        }
+
+                        // 3. Stop any active tracks from video elements
+                        if (visionVideoRef.current?.srcObject) {
+                          const stream = visionVideoRef.current.srcObject as MediaStream;
+                          stream.getTracks().forEach(t => {
+                            t.stop();
+                            console.log(`Stopped video element track: ${t.kind} (${t.label})`);
+                          });
+                          visionVideoRef.current.srcObject = null;
+                        }
+
+                        // 4. Enumerate and stop ALL active local media tracks on the device
+                        // This is a comprehensive cleanup to ensure nothing is left running
+                        // We skip the avatar video element to avoid stopping the remote HeyGen stream
+                        try {
+                          const allTracks: MediaStreamTrack[] = [];
+                          document.querySelectorAll('video, audio').forEach((element: Element) => {
+                            if (element === mediaStream.current) {
+                              return;
+                            }
+
+                            const mediaElement = element as HTMLVideoElement | HTMLAudioElement;
+                            if (mediaElement.srcObject) {
+                              const stream = mediaElement.srcObject as MediaStream;
+                              stream.getTracks().forEach(track => {
+                                if (track.readyState === 'live') {
+                                  allTracks.push(track);
+                                }
+                              });
+                            }
+                          });
+
+                          allTracks.forEach(track => {
+                            track.stop();
+                            console.log(`Stopped enumerated track: ${track.kind} (${track.label})`);
+                          });
+                        } catch (error) {
+                          console.warn('Error enumerating media tracks:', error);
+                        }
+
+                        // 5. Additional delay to ensure all streams are fully stopped before opening picker
+                        await new Promise(resolve => setTimeout(resolve, 600));
+
+                        // Reset input so selecting the same file fires change events
+                        fileInput.value = '';
+
+                        console.log('All media streams stopped, opening file picker...');
+                        fileInput.click();
+                      } catch (error) {
+                        console.error('Error preparing media picker:', error);
+                        isMediaCaptureActiveRef.current = false;
+                        setIsMediaCaptureActive(false);
                       }
                     }}
                     disabled={isAiProcessing}
@@ -2121,20 +2188,33 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                   {/* Paper Clip Button */}
                   <button
                     onClick={async () => {
+                      console.log('Preparing to open media picker...');
+
+                      const fileInput = fileInputRef.current;
+                      if (!fileInput) {
+                        console.warn('File input not available.');
+                        return;
+                      }
+
+                      isMediaCaptureActiveRef.current = true;
+                      setIsMediaCaptureActive(true);
+
+                      try {
                       // On mobile (especially iOS), video recording is blocked if any media stream
                       // (audio or video) is active, as iOS treats it as an "active call".
                       // We must stop ALL active media streams before opening the file picker.
-                      
                       console.log('Stopping all media streams to allow video recording...');
                       
                       // 1. Stop speech recognition (which may have active audio tracks)
-                      // Always stop, even if not active, to ensure any lingering streams are cleared
                       if (speechService.current) {
                         console.log('Stopping speech recognition...');
-                        speechService.current.stopListening();
-                        // Force stop audio stream as well to ensure microphone is fully released
-                        // This is critical on iOS where any active audio stream blocks video recording
+                          try {
+                            await speechService.current.stopListening();
+                          } catch (err) {
+                            console.warn('Error stopping speech recognition (ignored):', err);
+                          }
                         speechService.current.forceStopAudioStream();
+                          setIsListening(false);
                       }
                       
                       // 2. Stop vision camera stream (video tracks)
@@ -2165,11 +2245,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       // We skip the avatar video element to avoid stopping the remote HeyGen stream
                       try {
                         const allTracks: MediaStreamTrack[] = [];
-                        
-                        // Get all tracks from all video/audio elements in the document
-                        // Skip the avatar video element (mediaStream.current) as it contains remote tracks
                         document.querySelectorAll('video, audio').forEach((element: Element) => {
-                          // Skip avatar video element
                           if (element === mediaStream.current) {
                             return;
                           }
@@ -2178,8 +2254,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                           if (mediaElement.srcObject) {
                             const stream = mediaElement.srcObject as MediaStream;
                             stream.getTracks().forEach(track => {
-                              // Only stop tracks that are live (active)
-                              // Local tracks from getUserMedia will be live when active
                               if (track.readyState === 'live') {
                                 allTracks.push(track);
                               }
@@ -2187,7 +2261,6 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                           }
                         });
                         
-                        // Stop all found active tracks
                         allTracks.forEach(track => {
                           track.stop();
                           console.log(`Stopped enumerated track: ${track.kind} (${track.label})`);
@@ -2196,13 +2269,19 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                         console.warn('Error enumerating media tracks:', error);
                       }
                       
-                      // 6. Additional delay to ensure all streams are fully stopped before opening picker
-                      // iOS needs this delay to properly release the camera/microphone
-                      // Increased delay for better reliability on iOS devices
-                      await new Promise(resolve => setTimeout(resolve, 500));
+                        // 5. Additional delay to ensure all streams are fully stopped before opening picker
+                        await new Promise(resolve => setTimeout(resolve, 600));
+
+                        // Reset input so selecting the same file fires change events
+                        fileInput.value = '';
                       
                       console.log('All media streams stopped, opening file picker...');
-                      fileInputRef.current?.click();
+                        fileInput.click();
+                      } catch (error) {
+                        console.error('Error preparing media picker:', error);
+                        isMediaCaptureActiveRef.current = false;
+                        setIsMediaCaptureActive(false);
+                      }
                     }}
                     disabled={isAiProcessing}
                     className="flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl border border-white/20"
