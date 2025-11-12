@@ -362,7 +362,7 @@ function App() {
             const messagesForVision = [
               {
                 role: 'system' as const,
-                content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+                content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -528,7 +528,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         const messagesForAnswer = [
           {
             role: 'system' as const,
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+            content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -634,7 +634,7 @@ REMEMBER:
         messages: [
           {
             role: 'system',
-            content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+            content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -1075,7 +1075,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           const messages = [
             {
               role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+              content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -1143,7 +1143,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             messages: [
               {
                 role: 'system' as const,
-                content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+                content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -1214,7 +1214,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           const messages = [
             {
               role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+              content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -1275,7 +1275,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           messages: [
             {
               role: 'system' as const,
-              content: `You are iSolveUrProblems, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
+              content: `You are 6, a hilariously helpful AI assistant with the personality of a witty comedian who happens to be incredibly smart. Your mission: solve problems while making people laugh out loud!
 
 PERSONALITY TRAITS:
 - Crack jokes, puns, and witty observations constantly
@@ -1940,9 +1940,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <h1 
                   className="text-lg sm:text-xl lg:text-2xl font-bold" 
                   style={{ 
-                    fontFamily: designSettings.fonts.family, 
-                    color: designSettings.textColors.header,
-                    fontWeight: designSettings.fonts.weight
+                    fontFamily: 'Lobster, cursive', 
+                    color: '#ae9200',
+                    fontWeight: 500,
+                    fontSize: '1.2rem'
                   }}
                 >
                   iSolveUrProblems.ai – beta
@@ -1950,9 +1951,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <p 
                   className="text-[11px] sm:text-xs mt-0.5" 
                   style={{ 
-                    fontFamily: designSettings.fonts.family, 
-                    color: designSettings.textColors.header,
-                    opacity: 0.8
+                    fontFamily: 'Lobster, cursive', 
+                    color: '#ae9200',
+                    fontWeight: 500,
+                    fontSize: '1.0rem'
                   }}
                 >
                   Everything - except Murder
@@ -2011,8 +2013,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                       fontWeight: designSettings.fonts.weight
                     }}
                   >
-                    <div style={{ transform: 'translateX(-1.0em)' }}>Please...</div>
-                    <div>Be patient with 6</div>
+                    <div style={{ color: '#ae9200',transform: 'translateX(-1.0em)', fontFamily: 'Lobster, cursive' }}>Please...</div>
+                    <div style={{ color: '#ae9200', fontFamily: 'Lobster, cursive' }}>Be patient with 6</div>
                   </div>
                 </div>
 
@@ -2501,7 +2503,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     }}
                   >
                     <div>Please...</div>
-                    <div>Be patient with 6</div>
+                    <div style={{ color: '#ae9200' }}>Be patient with 6</div>
                   </div>
                 </div>
               </div>
