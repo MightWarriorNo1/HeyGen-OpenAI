@@ -1,4 +1,4 @@
-import { X, Settings, Type, Palette, Layout, Move } from 'lucide-react';
+import { X, Settings, Palette, Layout } from 'lucide-react';
 
 export interface DesignSettings {
   // Button Settings
@@ -90,20 +90,6 @@ export const DesignPanel = ({ isOpen, onClose, settings, onSettingsChange }: Des
 
   if (!isOpen) return null;
 
-  const fontFamilies = [
-    'Arial, sans-serif',
-    'Helvetica, sans-serif',
-    'Times New Roman, serif',
-    'Georgia, serif',
-    'Verdana, sans-serif',
-    'Courier New, monospace',
-    'Lobster, cursive',
-    'Bell MT, serif',
-    'Roboto, sans-serif',
-    'Open Sans, sans-serif',
-    'Montserrat, sans-serif',
-    'Poppins, sans-serif',
-  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
