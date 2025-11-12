@@ -146,6 +146,29 @@ function App() {
     // },
 
   ]);
+
+  // Helper function to handle streaming API calls and collect complete responses
+  const createStreamingCompletion = async (params: {
+    model: string;
+    messages: any[];
+    temperature: number;
+    max_tokens: number;
+  }): Promise<string> => {
+    const stream = await openai.chat.completions.create({
+      ...params,
+      stream: true,
+    } as any) as any;
+
+    let fullMessage = '';
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        fullMessage += content;
+      }
+    }
+    return fullMessage;
+  };
+
   // Function to exit vision mode
   const exitVisionMode = () => {
     setIsVisionMode(false);
@@ -414,14 +437,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               }
             ];
 
-            const aiResponse = await openai.chat.completions.create({
+            const aiMessage = await createStreamingCompletion({
               model: 'grok-2-vision',
               messages: messagesForVision,
               temperature: 0.8,
-              max_tokens: 400
-            } as any);
-
-            const aiMessage = aiResponse.choices[0].message.content || '';
+              max_tokens: 200
+            });
             // Add AI response to chat
             setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
             
@@ -573,14 +594,12 @@ INSTRUCTIONS:
           { role: 'user' as const, content: transcript }
         ];
 
-        const aiResponse = await openai.chat.completions.create({
+        const aiMessage = await createStreamingCompletion({
           model: 'grok-2-vision',
           messages: messagesForAnswer,
           temperature: 0.8,
-          max_tokens: 400
+          max_tokens: 200
         });
-
-        const aiMessage = aiResponse.choices[0].message.content || '';
         setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
         
         // CRITICAL: Suspend speech recognition BEFORE setting avatar speech
@@ -629,7 +648,7 @@ REMEMBER:
         };
       })();
 
-      const aiResponse = await openai.chat.completions.create({
+      const aiMessage = await createStreamingCompletion({
         model: 'grok-2-vision',
         messages: [
           {
@@ -680,10 +699,8 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           })
         ],
         temperature: 0.8,
-        max_tokens: 400
+        max_tokens: 200
       });
-
-      const aiMessage = aiResponse.choices[0].message.content || '';
       // Add AI response to chat
       setChatMessages(prev => [...prev, { role: 'assistant', message: aiMessage }]);
       
@@ -1059,7 +1076,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
   // Function to process media with AI (background). Stores results instead of replying immediately
   const processMediaWithAI = async (file: File, type: 'photo' | 'video', mediaKey: string) => {
     try {
-      let aiResponse;
+      let aiMessage = '';
 
       if (type === 'photo') {
         // For images, use vision model
@@ -1123,12 +1140,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ];
 
-          aiResponse = await openai.chat.completions.create({
+          aiMessage = await createStreamingCompletion({
             model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
-            max_tokens: 400
-          } as any);
+            max_tokens: 200
+          });
 
         } catch (visionError) {
           console.warn('Vision analysis failed, falling back to text-only:', visionError);
@@ -1138,7 +1155,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
           }));
 
-          aiResponse = await openai.chat.completions.create({
+          aiMessage = await createStreamingCompletion({
             model: 'grok-2-vision',
             messages: [
               {
@@ -1176,7 +1193,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
               }
             ],
             temperature: 0.8,
-            max_tokens: 400
+            max_tokens: 200
           });
         }
       } else {
@@ -1255,12 +1272,12 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ];
 
-          aiResponse = await openai.chat.completions.create({
+          aiMessage = await createStreamingCompletion({
             model: 'grok-2-vision',
             messages: messages,
             temperature: 0.8,
-            max_tokens: 400
-          } as any);
+            max_tokens: 200
+          });
 
         } catch (visionError) {
           console.warn('Video frame extraction/analysis failed, falling back to text-only:', visionError);
@@ -1270,7 +1287,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
           content: msg.media ? `${msg.message} [${msg.media.type.toUpperCase()}: ${msg.media.file.name}]` : msg.message
         }));
 
-        aiResponse = await openai.chat.completions.create({
+        aiMessage = await createStreamingCompletion({
           model: 'grok-2-vision',
           messages: [
             {
@@ -1294,7 +1311,6 @@ CONVERSATION MEMORY:
 
 RESPONSE STYLE:
 - Start responses with a funny observation or joke when appropriate
-- Use emojis sparingly but effectively for comedic timing
 - Vary your humor style (puns, observational comedy, absurdist humor)
 - Keep responses helpful but entertaining
 - If someone shares media, react with humor while being genuinely helpful
@@ -1308,11 +1324,10 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
             }
           ],
           temperature: 0.8,
-          max_tokens: 400
+          max_tokens: 200
         });
         }
       }
-      const aiMessage = aiResponse.choices[0].message.content || '';
       // Store analysis in background store
       setMediaAnalyses(prev => {
         const updated = {
@@ -1329,7 +1344,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
       });
 
       // Notify user that analysis is complete for this item
-      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}" and I've got all the details locked and loaded. I'm ready to help you with whatever you need! What questions do you have about it?`;
+      const doneText = `Perfect! I've completed analyzing your ${type === 'photo' ? 'image' : 'video'} "${file.name}". I'm ready to help you with whatever you need! What questions do you have about it?`;
       setChatMessages(prev => [...prev, { role: 'assistant', message: doneText }]);
       
       // Wait a bit for any previous speech to finish, then set the completion message
@@ -1775,23 +1790,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
         setStartAvatarLoading(false);
         setIsAvatarRunning(true);
         // Greet the user after stream and session are ready
-        setTimeout(() => {
-          if (sessionId || newSessionId) {
-            // CRITICAL: Stop speech recognition completely before greeting to prevent it from capturing avatar's voice
-            // This is more reliable than suspend() - we don't want any recognition running during initial greeting
-            const greetingText = 'Hello, I am 6, your personal assistant. How can I help you today?';
-            if (speechService.current) {
-              console.log('Stopping speech recognition completely before greeting...');
-              speechService.current.stopListening();
-              // Also suspend to mark that avatar will be speaking, pass greeting text for echo detection
-              speechService.current.suspend(greetingText);
-            }
-            // Mark this as initial greeting to protect it from interruption
-            isInitialGreetingRef.current = true;
-            console.log('👋 Starting initial greeting...');
-            setAvatarSpeech(greetingText);
-          }
-        }, 1500);
+        
         console.log('Avatar started successfully');
 
         // Try to play immediately after a micro delay to ensure DOM is updated
