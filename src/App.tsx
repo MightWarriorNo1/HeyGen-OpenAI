@@ -2496,7 +2496,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     style={{ 
                       fontFamily: 'Lobster, cursive',
                       color: textColor,
-                      fontSize: '1.8rem',
+                      fontSize: '2rem',
                       lineHeight: '1.2',
                       fontWeight: 'bold'
                     }}
