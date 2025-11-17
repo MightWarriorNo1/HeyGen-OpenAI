@@ -1939,7 +1939,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <h1 
                   className="text-lg sm:text-xl lg:text-2xl font-bold" 
                   style={{ 
-                    fontFamily: 'Lobster, cursive', 
+                    fontFamily: 'Bell MT', 
                     color: '#ae9200',
                     fontWeight: 500,
                     fontSize: '1.2rem'
@@ -1950,7 +1950,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                 <p 
                   className="text-[11px] sm:text-xs mt-0.5" 
                   style={{ 
-                    fontFamily: 'Lobster, cursive', 
+                    fontFamily: 'Bell MT', 
                     color: '#ae9200',
                     fontWeight: 500,
                     fontSize: '1.0rem'
@@ -2496,7 +2496,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     style={{ 
                       fontFamily: 'Lobster, cursive',
                       color: textColor,
-                      fontSize: '1.5rem',
+                      fontSize: '1.8rem',
                       lineHeight: '1.2',
                       fontWeight: 'bold'
                     }}
