@@ -2007,7 +2007,7 @@ Remember: You're not just solving problems, you're putting on a comedy show whil
                     style={{ 
                       fontFamily: designSettings.fonts.family,
                       color: designSettings.textColors.buttonText,
-                      fontSize: `${designSettings.fonts.size * 1.25}px`,
+                      fontSize: `2rem`,
                       lineHeight: designSettings.fonts.lineHeight,
                       fontWeight: designSettings.fonts.weight
                     }}
